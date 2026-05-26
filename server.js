@@ -911,6 +911,15 @@ app.post("/api/voice/session-history", async (req, res) => {
 
 const bridgeSupabase =
   process.env.LOCAL_ONLY === "1" ? null : require("./lib/bridgeSupabase");
+// cloudflared lifecycle — spawned alongside bridgeSupabase so the paired
+// browser session can reach this Mac from any device. URL changes flow
+// to bridgeSupabase.setTunnelUrl which publishes to Supabase via the
+// heartbeat RPC. Skipped in LOCAL_ONLY mode (no point in a tunnel when
+// nobody on the cloud side is paired).
+const bridgeCloudflared =
+  process.env.LOCAL_ONLY === "1" || process.env.VERONUM_DISABLE_CLOUDFLARED === "1"
+    ? null
+    : require("./lib/bridgeCloudflared");
 
 // Mutable record so HTTP endpoints (consumed by the menu bar via
 // electron/main.js) can introspect bridge state without going through
@@ -1120,6 +1129,30 @@ if (bridgeSupabase) {
     .catch((e) => {
       console.warn("[bridge] init failed (continuing in localhost-only mode):", e.message);
     });
+}
+
+// Spawn cloudflared and forward URL changes to Supabase. Started AFTER
+// bridgeSupabase.init() so setTunnelUrl can publish immediately on the
+// very first URL we see. cloudflared takes ~3–5s to register the tunnel
+// and print the URL — the daemon's HTTP listener is up well before then,
+// so there's no race with browsers hitting the tunnel before the local
+// origin is ready.
+if (bridgeCloudflared && bridgeSupabase) {
+  bridgeCloudflared.init({
+    onUrl: (url) => {
+      bridgeSupabase.setTunnelUrl(url).catch((e) =>
+        console.warn(`[bridge] setTunnelUrl failed: ${e.message}`),
+      );
+    },
+  });
+  // Clean shutdown — kill cloudflared when the daemon exits so we don't
+  // leak orphaned tunnels on every restart cycle.
+  const stopCloudflared = () => {
+    try { bridgeCloudflared.shutdown(); } catch {}
+  };
+  process.on("SIGINT", stopCloudflared);
+  process.on("SIGTERM", stopCloudflared);
+  process.on("beforeExit", stopCloudflared);
 }
 
 // Bridge state introspection endpoints — used by electron/main.js to

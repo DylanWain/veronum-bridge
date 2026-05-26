@@ -29,3 +29,7 @@ Thumbs.db
 # Electron-builder cache
 .cache/
 electron-builder-cache/
+
+# Claude Code / Supabase CLI scratch
+.claude/
+supabase/.temp/
