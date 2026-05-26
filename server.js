@@ -903,6 +903,160 @@ app.post("/api/voice/session-history", async (req, res) => {
   }
 });
 
+// ─── Cloud bridge (Supabase Realtime) ────────────────────────────
+// Connects this daemon to its Supabase broadcast channel so a signed-in
+// user at chat.thetoolswebsite.com can dispatch from any device.
+// LOCAL_ONLY=1 skips the cloud connection (use for dev when you don't
+// want the daemon to phone home).
+
+const bridgeSupabase =
+  process.env.LOCAL_ONLY === "1" ? null : require("./lib/bridgeSupabase");
+
+// Mutable record so HTTP endpoints (consumed by the menu bar via
+// electron/main.js) can introspect bridge state without going through
+// the lib module's internal closure.
+const bridgeState = {
+  state: "uninit",
+  detail: null,
+  userId: null,
+  pairCode: null,
+  pairUrl: null,
+  installId: null,
+};
+
+// Channel handler: when a paired chat client sends a `dispatch.request`
+// broadcast, we proxy it through our own localhost HTTP endpoint and
+// forward each SSE event back to the channel as a broadcast. This reuses
+// the existing dispatch code (claude --resume / cursor-agent) verbatim
+// — no refactor of the SSE handlers.
+async function handleChannelDispatch(message) {
+  if (message?.type !== "dispatch.request") return;
+  const p = message.payload || {};
+  const requestId = p.request_id || Math.random().toString(36).slice(2);
+  const editor = p.editor === "cursor" ? "cursor" : "claude";
+  const endpoint = editor === "cursor" ? "/api/cursor/send" : "/api/claude/send";
+
+  // Echo a "received" status so the browser knows the request landed.
+  await bridgeSupabase.sendOutbound("dispatch.status", {
+    request_id: requestId,
+    phase: "received",
+    detail: "daemon accepted",
+  });
+
+  let sseResp;
+  try {
+    sseResp = await fetch(`http://127.0.0.1:${PORT}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: p.cwd,
+        sessionId: p.sessionId,
+        prompt: p.prompt,
+        model: p.model,
+        effort: p.effort,
+      }),
+    });
+    if (!sseResp.ok) {
+      const detail = await sseResp.text().catch(() => "");
+      await bridgeSupabase.sendOutbound("dispatch.error", {
+        request_id: requestId,
+        message: `local ${endpoint} returned ${sseResp.status}`,
+        detail: detail.slice(0, 400),
+      });
+      return;
+    }
+  } catch (e) {
+    await bridgeSupabase.sendOutbound("dispatch.error", {
+      request_id: requestId,
+      message: "could not reach local dispatch: " + e.message,
+    });
+    return;
+  }
+
+  // Stream-parse SSE, forward each event to the channel with the
+  // request_id baked in (so the browser can correlate concurrent
+  // dispatches).
+  const reader = sseResp.body.getReader();
+  const dec = new TextDecoder("utf-8");
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const parts = buf.split("\n\n");
+    buf = parts.pop() || "";
+    for (const block of parts) {
+      const lines = block.split("\n");
+      let event = "message", data = "";
+      for (const ln of lines) {
+        if (ln.startsWith("event: ")) event = ln.slice(7).trim();
+        else if (ln.startsWith("data: ")) data += ln.slice(6);
+      }
+      if (!data) continue;
+      let payload;
+      try { payload = JSON.parse(data); } catch { continue; }
+      // Re-namespace the event to dispatch.<original>
+      const channelEvent = `dispatch.${event}`;
+      try {
+        await bridgeSupabase.sendOutbound(channelEvent, {
+          request_id: requestId,
+          ...payload,
+        });
+      } catch (e) {
+        console.warn("[bridge] forward failed:", e.message);
+      }
+    }
+  }
+}
+
+if (bridgeSupabase) {
+  bridgeSupabase
+    .init({
+      onState: (s) => {
+        Object.assign(bridgeState, s, { installId: bridgeSupabase.getInstallId() });
+      },
+      onDispatch: (msg) => {
+        // Fire-and-forget — channel events flow through .sendOutbound.
+        handleChannelDispatch(msg).catch((e) =>
+          console.warn("[bridge] dispatch error:", e),
+        );
+      },
+    })
+    .catch((e) => {
+      console.warn("[bridge] init failed (continuing in localhost-only mode):", e.message);
+    });
+}
+
+// Bridge state introspection endpoints — used by electron/main.js to
+// render the menu-bar UI (status text, "Pair this Mac" button, etc.).
+app.get("/api/bridge/state", (_req, res) => {
+  res.json({ ok: true, ...bridgeState });
+});
+
+app.post("/api/bridge/begin-pair", async (_req, res) => {
+  if (!bridgeSupabase) {
+    return res.status(503).json({ ok: false, error: "bridge disabled (LOCAL_ONLY)" });
+  }
+  try {
+    const out = await bridgeSupabase.beginPair();
+    res.json({ ok: true, ...out });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/bridge/unpair", async (_req, res) => {
+  if (!bridgeSupabase) {
+    return res.status(503).json({ ok: false, error: "bridge disabled (LOCAL_ONLY)" });
+  }
+  try {
+    await bridgeSupabase.forceUnpair();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ─── Health + boot ────────────────────────────────────────────────
 
 app.get("/api/health", (_req, res) => {
@@ -913,10 +1067,16 @@ app.get("/api/health", (_req, res) => {
     cursorAgentBin: whichCursorAgentBin(),
     claudeProjectsDir: claudeReader.CLAUDE_PROJECTS_DIR,
     cacheSize: jsonlCache.size ? jsonlCache.size() : "n/a",
+    bridge: { state: bridgeState.state, paired: bridgeState.state === "connected" },
   });
 });
 
 app.listen(PORT, () => {
   console.log(`✓ Veronum chat localhost running at http://localhost:${PORT}`);
   console.log(`  Claude projects: ${claudeReader.CLAUDE_PROJECTS_DIR}`);
+  if (bridgeSupabase) {
+    console.log(`  Bridge install: ${bridgeSupabase.getInstallId().slice(0, 8)}…`);
+  } else {
+    console.log(`  Bridge: disabled (LOCAL_ONLY=1)`);
+  }
 });

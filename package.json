@@ -15,8 +15,10 @@
     "publish:mac": "electron-builder --mac --universal --publish always"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
     "dotenv": "^17.4.2",
-    "express": "^4.21.0"
+    "express": "^4.21.0",
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
     "@electron/notarize": "^2.5.0",
@@ -66,11 +68,15 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["universal"]
+          "arch": [
+            "universal"
+          ]
         },
         {
           "target": "zip",
-          "arch": ["universal"]
+          "arch": [
+            "universal"
+          ]
         }
       ]
     },
