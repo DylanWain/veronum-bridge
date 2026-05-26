@@ -33,3 +33,8 @@ electron-builder-cache/
 # Claude Code / Supabase CLI scratch
 .claude/
 supabase/.temp/
+
+# Bundled cloudflared binary — 76MB universal, refetched on demand via
+# scripts/fetch-cloudflared.sh. Tracking it would bloat clones and
+# require manual re-commit on every cloudflared upgrade.
+bin/cloudflared

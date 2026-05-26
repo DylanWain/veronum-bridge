@@ -1,7 +1,7 @@
 {
   "name": "veronum-bridge",
   "productName": "Veronum Bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Mac bridge daemon — runs claude/cursor session relay locally so the user's chat UI on any device can reach their machine.",
   "private": true,
   "type": "commonjs",
@@ -10,6 +10,10 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "electron:dev": "electron .",
+    "fetch:cloudflared": "bash scripts/fetch-cloudflared.sh",
+    "prepackage:mac": "bash scripts/fetch-cloudflared.sh",
+    "prepackage:mac:fast": "bash scripts/fetch-cloudflared.sh",
+    "prepublish:mac": "bash scripts/fetch-cloudflared.sh",
     "package:mac": "electron-builder --mac --universal",
     "package:mac:fast": "SKIP_NOTARIZE=1 electron-builder --mac --universal",
     "publish:mac": "electron-builder --mac --universal --publish always"
