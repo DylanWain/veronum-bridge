@@ -924,6 +924,91 @@ const bridgeState = {
   installId: null,
 };
 
+// Generic HTTP proxy over the channel — accepts {method, path, body,
+// stream} and forwards to our own localhost server, then sends the
+// response back. Lets the cloud chat web app talk to the daemon using
+// almost the same code it used in localhost mode (just wrap fetch in
+// bridgeFetch on the client). Supports both:
+//   - one-shot JSON responses (the common case: /api/projects,
+//     /api/claude/sessions, /api/voice/realtime-token, etc.)
+//   - SSE streaming responses (the dispatch endpoints) — emits
+//     bridge.fetch.chunk for each event, bridge.fetch.done at the end.
+async function handleChannelFetch(message) {
+  const p = message?.payload || {};
+  const requestId = p.request_id || Math.random().toString(36).slice(2);
+  const method = (p.method || "GET").toUpperCase();
+  const path = p.path || "/api/health";
+  const body = p.body; // string | object | undefined
+  const wantsStream = !!p.stream;
+
+  const url = `http://127.0.0.1:${PORT}${path}`;
+  const init = {
+    method,
+    headers: { "Content-Type": "application/json" },
+  };
+  if (body !== undefined && method !== "GET" && method !== "HEAD") {
+    init.body = typeof body === "string" ? body : JSON.stringify(body);
+  }
+
+  let resp;
+  try {
+    resp = await fetch(url, init);
+  } catch (e) {
+    await bridgeSupabase.sendOutbound("bridge.fetch.error", {
+      request_id: requestId,
+      message: e.message,
+    });
+    return;
+  }
+
+  if (!wantsStream) {
+    // One-shot JSON response. Read full body, ship it as a single event.
+    const text = await resp.text();
+    let parsed;
+    try { parsed = JSON.parse(text); } catch { parsed = text; }
+    await bridgeSupabase.sendOutbound("bridge.fetch.response", {
+      request_id: requestId,
+      status: resp.status,
+      ok: resp.ok,
+      body: parsed,
+    });
+    return;
+  }
+
+  // SSE streaming response — translate each event to a channel broadcast.
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder("utf-8");
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const parts = buf.split("\n\n");
+    buf = parts.pop() || "";
+    for (const block of parts) {
+      const lines = block.split("\n");
+      let event = "message", data = "";
+      for (const ln of lines) {
+        if (ln.startsWith("event: ")) event = ln.slice(7).trim();
+        else if (ln.startsWith("data: ")) data += ln.slice(6);
+      }
+      if (!data) continue;
+      let payload;
+      try { payload = JSON.parse(data); } catch { continue; }
+      await bridgeSupabase.sendOutbound("bridge.fetch.chunk", {
+        request_id: requestId,
+        event,
+        ...payload,
+      });
+    }
+  }
+  await bridgeSupabase.sendOutbound("bridge.fetch.done", {
+    request_id: requestId,
+    status: resp.status,
+    ok: resp.ok,
+  });
+}
+
 // Channel handler: when a paired chat client sends a `dispatch.request`
 // broadcast, we proxy it through our own localhost HTTP endpoint and
 // forward each SSE event back to the channel as a broadcast. This reuses
@@ -1017,9 +1102,19 @@ if (bridgeSupabase) {
       },
       onDispatch: (msg) => {
         // Fire-and-forget — channel events flow through .sendOutbound.
-        handleChannelDispatch(msg).catch((e) =>
-          console.warn("[bridge] dispatch error:", e),
-        );
+        // Route by message type:
+        //   - dispatch.request: legacy direct-to-claude/cursor path
+        //   - bridge.fetch.request: generic HTTP proxy (the new path
+        //     the cloud chat web app uses for projects/sessions/voice)
+        if (msg?.type === "bridge.fetch.request") {
+          handleChannelFetch(msg).catch((e) =>
+            console.warn("[bridge] fetch error:", e),
+          );
+        } else {
+          handleChannelDispatch(msg).catch((e) =>
+            console.warn("[bridge] dispatch error:", e),
+          );
+        }
       },
     })
     .catch((e) => {
