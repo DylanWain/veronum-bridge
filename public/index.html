@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en" data-mode="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
+  />
+  <meta name="theme-color" content="#141414" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Veronum" />
+  <title>Veronum</title>
+  <!-- IBM Plex (Veronum's UI font) preconnects + stylesheet via @import in style.css -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body data-mode="dark">
+  <!-- Top bar: drawer hamburger, session pill (tap to open drawer too),
+       refresh icon. Fixed at top, blurs content behind it on scroll. -->
+  <header class="topbar">
+    <button id="drawer-btn" class="topbar-btn" aria-label="Open sessions drawer">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
+      </svg>
+    </button>
+    <button id="session-pill" class="session-pill" aria-label="Switch session">
+      <span id="chat-title" class="session-pill-name">Pick a session</span>
+      <span id="status" class="session-pill-meta">loading…</span>
+    </button>
+    <button id="refresh-btn" class="topbar-btn" aria-label="Refresh chat" hidden>
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <path d="M21 12a9 9 0 1 1-3.5-7.1M21 4v5h-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      </svg>
+    </button>
+  </header>
+
+  <!-- Drawer backdrop (mobile only). Tap to close. -->
+  <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+
+  <!-- Drawer: two views — 'projects' (default) and 'sessions' (after
+       picking a project). Back arrow returns to projects. On desktop
+       the drawer is pinned; the same view-swap navigation applies. -->
+  <aside id="drawer" class="drawer" data-view="projects">
+    <header class="drawer-header">
+      <button id="drawer-back" class="drawer-back" aria-label="Back to projects">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+          <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </button>
+      <div class="drawer-avatar" aria-hidden="true">D</div>
+      <div class="drawer-meta">
+        <div id="drawer-title" class="drawer-name">Dylan</div>
+        <div id="drawer-subtitle" class="drawer-sub">Veronum · localhost</div>
+      </div>
+      <button id="drawer-close" class="drawer-close" aria-label="Close drawer">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <path d="M6 6l12 12M6 18L18 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
+        </svg>
+      </button>
+    </header>
+
+    <input
+      id="drawer-search"
+      class="drawer-search"
+      placeholder="Search…"
+      autocomplete="off"
+      autocorrect="off"
+      spellcheck="false"
+    />
+
+    <div class="drawer-scroll">
+      <!-- Projects view — shown when drawer's data-view="projects" -->
+      <section id="claude-projects" class="drawer-section" data-view-of="projects" data-active="true">
+        <h3>Claude</h3>
+        <ul></ul>
+      </section>
+      <section id="cursor-projects" class="drawer-section" data-view-of="projects" data-active="true">
+        <h3>Cursor</h3>
+        <ul></ul>
+      </section>
+
+      <!-- Sessions view — shown when drawer's data-view="sessions" -->
+      <section id="sessions" class="drawer-section" data-view-of="sessions">
+        <h3>
+          Sessions <span id="project-label" class="dim"></span>
+        </h3>
+        <ul></ul>
+      </section>
+    </div>
+  </aside>
+
+  <!-- Main chat area: voice activity bar + messages stream + composer. -->
+  <main class="chat-main">
+    <!-- Thin animated bar across the top of the chat when voice is
+         active. Color shifts based on companion-speaking vs listening. -->
+    <div id="voice-bar" class="voice-bar" hidden></div>
+
+    <div id="messages" class="messages">
+      <div class="empty">Open a session to see the conversation.</div>
+    </div>
+
+    <form id="composer" class="composer" hidden>
+      <!-- Small meta strip: model + effort + status. Kept inline but
+           muted so it doesn't compete with the input + mic. -->
+      <div class="composer-meta">
+        <label class="opt">
+          <select id="model-select" aria-label="Model"></select>
+        </label>
+        <label class="opt" id="effort-wrap">
+          <select id="effort-select" aria-label="Effort"></select>
+        </label>
+        <span id="dispatch-status" class="dim"></span>
+      </div>
+      <div class="composer-row">
+        <textarea
+          id="composer-input"
+          rows="1"
+          placeholder="Ask Claude…"
+          autocomplete="off"
+          autocorrect="on"
+          spellcheck="true"
+        ></textarea>
+        <div class="composer-actions">
+          <button
+            id="voice-stop-btn"
+            type="button"
+            class="voice-stop"
+            aria-label="Stop voice mode"
+            hidden
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+              <path d="M6 6l12 12M6 18L18 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" fill="none"/>
+            </svg>
+          </button>
+          <button
+            id="mic-btn"
+            type="button"
+            class="mic"
+            aria-label="Click to enable voice · hold to talk to Claude"
+          >
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor"/>
+              <path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
+            </svg>
+          </button>
+          <button
+            id="send-btn"
+            type="submit"
+            class="send-btn"
+            aria-label="Send"
+            disabled
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path d="M12 19V5M5 12l7-7 7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </form>
+
+    <div id="voice-status" class="voice-status" hidden></div>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

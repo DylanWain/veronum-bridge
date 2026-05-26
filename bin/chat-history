@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""
+chat-history — query a Claude Code session JSONL without loading it
+into the model context. Used by the localhost dispatch's
+--append-system-prompt addendum so a resumed Claude can answer
+meta-history questions (first message, message counts, timestamps)
+correctly even when the full transcript doesn't fit in its context
+window.
+
+Usage:
+  chat-history first   <jsonl_path>          # first user text message
+  chat-history nth N   <jsonl_path>          # Nth user text message (1-indexed)
+  chat-history count   <jsonl_path>          # total user text messages
+  chat-history first-ts <jsonl_path>         # timestamp of message #1
+  chat-history nth-ts N <jsonl_path>         # timestamp of message #N
+  chat-history list    <jsonl_path> [LIMIT]  # list first LIMIT (default 10):
+                                             #   "N\t<ts>\t<first 120 chars>"
+  chat-history grep    PATTERN <jsonl_path>  # find user messages matching
+                                             #   regex; prints "N\t<ts>\t<text>"
+
+Counts and indices only consider main-thread (isSidechain=false) USER
+messages whose content includes a text block. Tool results, attachments,
+and sidechain messages are excluded — they aren't conversational turns.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from typing import Iterator, Tuple
+
+
+def iter_user_text_messages(path: str) -> Iterator[Tuple[int, str, str]]:
+    """Yield (index_1based, timestamp, text) for each main-thread user text msg."""
+    n = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if o.get("type") != "user":
+                continue
+            if o.get("isSidechain"):
+                continue
+            msg = o.get("message") or {}
+            content = msg.get("content")
+            text_parts: list[str] = []
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        if isinstance(text, str) and text.strip():
+                            text_parts.append(text)
+            elif isinstance(content, str) and content.strip():
+                text_parts.append(content)
+            if not text_parts:
+                continue
+            joined = "\n".join(text_parts)
+            n += 1
+            yield n, str(o.get("timestamp", "")), joined
+
+
+def cmd_first(path: str) -> int:
+    for n, _ts, text in iter_user_text_messages(path):
+        print(text)
+        return 0
+    print("(no user text messages found)", file=sys.stderr)
+    return 1
+
+
+def cmd_nth(n_str: str, path: str) -> int:
+    try:
+        target = int(n_str)
+    except ValueError:
+        print(f"chat-history nth: N must be an integer, got {n_str!r}", file=sys.stderr)
+        return 2
+    if target < 1:
+        print(f"chat-history nth: N must be >= 1, got {target}", file=sys.stderr)
+        return 2
+    for n, _ts, text in iter_user_text_messages(path):
+        if n == target:
+            print(text)
+            return 0
+    print(f"(only {n} user text messages — N={target} out of range)", file=sys.stderr)
+    return 1
+
+
+def cmd_count(path: str) -> int:
+    total = 0
+    for n, _ts, _t in iter_user_text_messages(path):
+        total = n
+    print(total)
+    return 0
+
+
+def cmd_first_ts(path: str) -> int:
+    for _n, ts, _t in iter_user_text_messages(path):
+        print(ts)
+        return 0
+    return 1
+
+
+def cmd_nth_ts(n_str: str, path: str) -> int:
+    try:
+        target = int(n_str)
+    except ValueError:
+        return 2
+    for n, ts, _t in iter_user_text_messages(path):
+        if n == target:
+            print(ts)
+            return 0
+    return 1
+
+
+def cmd_list(path: str, limit_str: str = "10") -> int:
+    try:
+        limit = max(1, int(limit_str))
+    except ValueError:
+        limit = 10
+    shown = 0
+    for n, ts, text in iter_user_text_messages(path):
+        preview = text.replace("\n", " ").strip()
+        if len(preview) > 120:
+            preview = preview[:117] + "..."
+        print(f"{n}\t{ts}\t{preview}")
+        shown += 1
+        if shown >= limit:
+            return 0
+    return 0
+
+
+def cmd_grep(pattern: str, path: str) -> int:
+    try:
+        rx = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        print(f"chat-history grep: bad pattern: {e}", file=sys.stderr)
+        return 2
+    hits = 0
+    for n, ts, text in iter_user_text_messages(path):
+        if rx.search(text):
+            preview = text.replace("\n", " ").strip()
+            if len(preview) > 200:
+                preview = preview[:197] + "..."
+            print(f"{n}\t{ts}\t{preview}")
+            hits += 1
+    return 0 if hits > 0 else 1
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    cmd, *rest = argv[1:]
+    try:
+        if cmd == "first" and len(rest) == 1:
+            return cmd_first(rest[0])
+        if cmd == "nth" and len(rest) == 2:
+            return cmd_nth(rest[0], rest[1])
+        if cmd == "count" and len(rest) == 1:
+            return cmd_count(rest[0])
+        if cmd == "first-ts" and len(rest) == 1:
+            return cmd_first_ts(rest[0])
+        if cmd == "nth-ts" and len(rest) == 2:
+            return cmd_nth_ts(rest[0], rest[1])
+        if cmd == "list" and 1 <= len(rest) <= 2:
+            return cmd_list(rest[0], rest[1] if len(rest) == 2 else "10")
+        if cmd == "grep" and len(rest) == 2:
+            return cmd_grep(rest[0], rest[1])
+    except FileNotFoundError as e:
+        print(f"chat-history: {e}", file=sys.stderr)
+        return 1
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

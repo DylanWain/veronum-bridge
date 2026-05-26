@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Entitlements for the macOS hardened runtime.
+    Required for notarization on Apple Silicon.
+
+    The first three are standard Electron requirements:
+      • allow-jit                       — V8 needs JIT for normal JS execution
+      • allow-unsigned-executable-memory — Electron's native modules
+      • disable-library-validation      — load unsigned dylibs we ship in the bundle
+
+    network.client lets the app reach Supabase / the Veronum-site / claude.ai.
+    files.user-selected.read-write covers OS file dialogs (none today, future-proofing).
+  -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+</dict>
+</plist>

@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Secrets (NEVER commit — has ELEVENLABS + OPENAI keys)
+.env
+.env.local
+.env.*.local
+
+# Build artifacts (signed/notarized DMGs go via GitHub Releases, not git)
+dist/
+out/
+build/Release/
+
+# Logs + runtime
+*.log
+.cloudflared.log
+/tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Electron-builder cache
+.cache/
+electron-builder-cache/

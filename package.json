@@ -1,0 +1,88 @@
+{
+  "name": "veronum-bridge",
+  "productName": "Veronum Bridge",
+  "version": "0.1.0",
+  "description": "Mac bridge daemon — runs claude/cursor session relay locally so the user's chat UI on any device can reach their machine.",
+  "private": true,
+  "type": "commonjs",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "electron:dev": "electron .",
+    "package:mac": "electron-builder --mac --universal",
+    "package:mac:fast": "SKIP_NOTARIZE=1 electron-builder --mac --universal",
+    "publish:mac": "electron-builder --mac --universal --publish always"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^2.5.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "build": {
+    "appId": "com.veronum.bridge",
+    "productName": "Veronum Bridge",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "server.js",
+      "lib/**/*",
+      "public/**/*",
+      "bin/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "bin/**/*"
+    ],
+    "afterSign": "scripts/notarize-afterSign.js",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "LSUIElement": true,
+        "CFBundleURLTypes": [
+          {
+            "CFBundleURLName": "Veronum Bridge Magic Link",
+            "CFBundleURLSchemes": [
+              "veronum-bridge"
+            ]
+          }
+        ]
+      },
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["universal"]
+        },
+        {
+          "target": "zip",
+          "arch": ["universal"]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "Veronum Bridge",
+      "icon": "build/icon.icns"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "DylanWain",
+      "repo": "veronum-bridge",
+      "releaseType": "release"
+    }
+  }
+}
