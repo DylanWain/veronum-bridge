@@ -2,7 +2,13 @@
 
 The Mac side of Veronum — a small menu-bar daemon that runs your local Claude Code and Cursor sessions through a chat UI you can reach from any device.
 
-Pair the bridge once to your account at thetoolswebsite.com; from then on you can open chat.thetoolswebsite.com on any phone or laptop and talk to your actual coding sessions — voice or text — while the work happens on your Mac.
+Pair the bridge once to your account at [thetoolswebsite.com](https://www.thetoolswebsite.com); from then on you can open chat.thetoolswebsite.com on any phone or laptop and talk to your actual coding sessions — voice or text — while the work happens on your Mac.
+
+## Download (macOS)
+
+[**Veronum Bridge — Universal Mac DMG**](https://github.com/DylanWain/veronum-bridge/releases/latest/download/Veronum-Bridge.dmg) · Apple Silicon + Intel, signed and notarized.
+
+Signed by `Developer ID Application: Dylan Wain (YNZLTKWB83)`. macOS will install it silently — no Gatekeeper warnings.
 
 ## What it does
 
