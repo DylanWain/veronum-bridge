@@ -1,0 +1,16 @@
+# Supabase CLI config — links this repo's migrations + functions to the
+# live Veronum project (synpjcammfjebwsmtfpz).
+#
+# To apply the migration:
+#   supabase link --project-ref synpjcammfjebwsmtfpz
+#   supabase db push
+#
+# To deploy the edge function:
+#   supabase functions deploy veronum-bridge --no-verify-jwt
+#
+# The --no-verify-jwt is important: the /begin-pair and /status routes
+# are called by the daemon BEFORE it has any user JWT. The handlers
+# verify the Supabase auth bearer themselves for the routes that need
+# it (/complete-pair, /unpair).
+
+project_id = "synpjcammfjebwsmtfpz"
