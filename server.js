@@ -327,6 +327,22 @@ app.post("/api/claude/send", async (req, res) => {
     res.status(400).json({ ok: false, error: "cwd, sessionId, prompt required" });
     return;
   }
+  // Billing gate — atomic check + record. Fails closed on Supabase
+  // error (rather than silently allowing) so we never lose track of
+  // free-quota consumption while the network is flaky.
+  if (billingGate) {
+    try {
+      const g = await billingGate.gateClaudeDispatch();
+      if (!g.allowed) {
+        res.status(402).json(billingGate.paywallResponse(g));
+        return;
+      }
+    } catch (e) {
+      console.warn("[gate] claude dispatch gate failed:", e.message);
+      res.status(503).json({ ok: false, error: "billing_unavailable", detail: e.message });
+      return;
+    }
+  }
   const conflict = isClaudeAlreadyRunningOnSession(sessionId);
   if (conflict.running) {
     res.status(409).json({
@@ -496,6 +512,19 @@ app.post("/api/cursor/send", async (req, res) => {
   if (!cwd || typeof prompt !== "string" || !prompt.trim()) {
     res.status(400).json({ ok: false, error: "cwd + prompt required" });
     return;
+  }
+  if (billingGate) {
+    try {
+      const g = await billingGate.gateCursorDispatch();
+      if (!g.allowed) {
+        res.status(402).json(billingGate.paywallResponse(g));
+        return;
+      }
+    } catch (e) {
+      console.warn("[gate] cursor dispatch gate failed:", e.message);
+      res.status(503).json({ ok: false, error: "billing_unavailable", detail: e.message });
+      return;
+    }
   }
   const { sendEvent, close } = openSseStream(res);
   sendEvent("status", { phase: "spawning" });
@@ -695,6 +724,20 @@ const COMPANION_TOOLS = [
 // Mint an ephemeral client_secret for OpenAI Realtime. Browser opens
 // the WebRTC directly to OpenAI using this secret.
 app.get("/api/voice/realtime-token", async (_req, res) => {
+  // Gate voice at session start. Voice is metered per-minute server-side
+  // but we charge a 1-min minimum at session open so the user can't
+  // sneak in a sub-second session right at the quota edge.
+  if (billingGate) {
+    try {
+      const g = await billingGate.gateVoiceSession();
+      if (!g.allowed) {
+        return res.status(402).json(billingGate.paywallResponse(g));
+      }
+    } catch (e) {
+      console.warn("[gate] voice session gate failed:", e.message);
+      return res.status(503).json({ ok: false, error: "billing_unavailable", detail: e.message });
+    }
+  }
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return res.status(500).json({
@@ -911,6 +954,11 @@ app.post("/api/voice/session-history", async (req, res) => {
 
 const bridgeSupabase =
   process.env.LOCAL_ONLY === "1" ? null : require("./lib/bridgeSupabase");
+// Billing gate — atomically checks the user's free quota / subscription
+// state and records usage. Skipped in LOCAL_ONLY (no paired user to
+// charge); silently allows when daemon is unpaired (reason='unpaired').
+const billingGate =
+  process.env.LOCAL_ONLY === "1" ? null : require("./lib/billingGate");
 // cloudflared lifecycle — spawned alongside bridgeSupabase so the paired
 // browser session can reach this Mac from any device. URL changes flow
 // to bridgeSupabase.setTunnelUrl which publishes to Supabase via the
