@@ -767,6 +767,19 @@ button { font-family: inherit; color: inherit; }
   .preview-frame { border-radius: 0; }
 }
 
+/* The HTML5 `hidden` attribute normally maps to display:none, but the
+ * `.preview-body[data-tab="files"]` rule sets display:flex with higher
+ * specificity which was overriding `hidden` and made both tab bodies
+ * render simultaneously (one stacked behind the other). Forcing the
+ * `hidden` attribute to always win restores clean tab switching. */
+.preview-body[hidden] { display: none !important; }
+
+/* On desktop the drawer is pinned to the left at var(--drawer-w). The
+ * preview panel should sit alongside it, not slide behind it. */
+@media (min-width: 900px) {
+  .preview-panel { left: var(--drawer-w); }
+}
+
 /* ─── Workspace panel tabs (Files | Preview) ───────────────────────── */
 .preview-tabs {
   display: inline-flex;

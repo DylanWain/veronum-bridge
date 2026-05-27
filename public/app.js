@@ -1183,6 +1183,23 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
       const root = renderEntries(entries, 0);
       root.style.display = "block";
       while (root.firstChild) els.tree.appendChild(root.firstChild);
+
+      // Auto-open a sensible default file so the viewer isn't a blank
+      // "Pick a file…" prompt on first open. Priority:
+      //   README.md > README > package.json > tsconfig.json > first file
+      const PICK_ORDER = ["README.md", "README", "readme.md", "package.json", "tsconfig.json"];
+      const fileEntries = entries.filter((e) => e.type === "file");
+      let defaultFile = PICK_ORDER
+        .map((name) => fileEntries.find((e) => e.name === name))
+        .find(Boolean);
+      if (!defaultFile) {
+        // Fallback: pick the first text-looking file (has a dot extension).
+        defaultFile = fileEntries.find((e) => e.name.includes("."));
+      }
+      if (defaultFile) {
+        // Don't await — let the tree render first, then the viewer fills in.
+        openFile(defaultFile.rel);
+      }
     } catch (e) {
       els.tree.innerHTML = `<div class="files-empty">Couldn't load tree: ${escapeHtml(e.message)}</div>`;
     }
