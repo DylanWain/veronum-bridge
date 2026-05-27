@@ -53,13 +53,24 @@ declare
   v_billed int;
   v_status text;
   v_tier text;
+  v_has_sub boolean;
   v_free_limit constant int := 25;
-  v_sub_included constant int := 2500;
+  v_sub_included constant int := 1500;   -- matches Vercel env CHAD_INCLUDED_CENTS
   v_multiplier int;
   v_billed_add int;
 begin
-  select u.period_consumed_cents, u.period_billed_cents, u.subscription_status, u.tier
-    into v_consumed, v_billed, v_status, v_tier
+  -- Look up the user + ALL signals that indicate active subscription:
+  --   1. users.tier IN ('chad','payg','admin') — primary tier signal
+  --   2. users.subscription_status IN ('active','trialing') — legacy field
+  --   3. EXISTS subscriptions row with status='active' — what the
+  --      pre-existing stripe-webhook edge function writes on
+  --      checkout.session.completed. Without this fallback, a user who
+  --      pays via the Payment Link gets a subscriptions row but
+  --      users.tier stays NULL and they'd be blocked here.
+  select u.period_consumed_cents, u.period_billed_cents,
+         u.subscription_status, u.tier,
+         exists(select 1 from public.subscriptions s where s.user_id = u.id and s.status = 'active')
+    into v_consumed, v_billed, v_status, v_tier, v_has_sub
   from public.users u where u.id = p_user_id;
 
   if not found then
@@ -87,8 +98,9 @@ begin
     return;
   end if;
 
-  -- Active flat subscriber: 1x for first $25 of billed usage, then 2x.
-  if v_status in ('active', 'trialing') then
+  -- Active flat subscriber: 1x for first $15 included, then 2x overage.
+  -- Any of the three sub signals counts as subscribed.
+  if v_tier = 'chad' or v_status in ('active', 'trialing') or v_has_sub then
     if v_billed < v_sub_included then v_multiplier := 1; else v_multiplier := 2; end if;
     v_billed_add := p_charged_cents * v_multiplier;
     update public.users set
@@ -99,7 +111,7 @@ begin
     return query select true, 'subscribed'::text, v_consumed + p_raw_cents,
       v_billed + v_billed_add,
       greatest(v_sub_included - (v_billed + v_billed_add), 0),
-      v_status, v_tier, v_multiplier;
+      coalesce(v_status, 'active'), coalesce(v_tier, 'chad'), v_multiplier;
     return;
   end if;
 
