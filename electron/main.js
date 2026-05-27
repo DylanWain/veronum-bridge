@@ -3,59 +3,80 @@
  * Express server.
  *
  * Why Electron at all (vs. a pure Node binary)?
- *   1. We get Mac code-signing + notarization for free via electron-
- *      builder + scripts/notarize-afterSign.js (already battle-tested
- *      in veronum-overlay).
- *   2. We get a real .app bundle with a menu-bar Tray icon, which lets
- *      the user pause/quit/open the chat without keeping a terminal
- *      window open. Pure `pkg`-bundled binaries can't draw native UI.
- *   3. We can ship the same DMG cert + entitlements + auto-update
- *      pipeline veronum-overlay uses, instead of reinventing it.
+ *   1. Mac code-signing + notarization for free via electron-builder.
+ *   2. A real .app with a menu-bar Tray icon so the user can pair /
+ *      unpair / pause / quit without a terminal.
+ *   3. The same DMG cert + entitlements + auto-update pipeline used
+ *      by veronum-overlay.
  *
- * Architecture: this main process loads server.js synchronously, which
- * triggers app.listen(3001) inside it. The Electron process becomes the
- * Node host for the Express app. No `BrowserWindow` is created — the
- * UI is the user's external browser (Chrome/Safari) hitting
- * http://localhost:3001 or, in the cloud-relay phase, chat.thetoolswebsite.com.
+ * Architecture: this main process synchronously requires server.js,
+ * which triggers app.listen(3001) inside it. The Electron process
+ * becomes the Node host for the Express app. No BrowserWindow is
+ * created — the UI is the user's external browser hitting
+ * thetoolswebsite.com (which redirects to the local tunnel) or
+ * http://localhost:3001 directly.
+ *
+ * Pair UX flow (v0.3.2+):
+ *   1. On first launch, server boots → bridgeSupabase.init() polls
+ *      /functions/v1/veronum-bridge/status → state goes "unpaired".
+ *   2. This file polls http://localhost:3001/api/bridge/state every
+ *      3s. When state = "unpaired" AND we haven't auto-paired yet,
+ *      we POST /api/bridge/begin-pair → get pair_url → open it in
+ *      the default browser.
+ *   3. User signs in (or signs up) on /pair-bridge?code=XXX → page
+ *      POSTs /complete-pair → bridge row gets user_id.
+ *   4. Daemon's next /status poll sees user_id set → connects to
+ *      Realtime channel → state goes "connected".
+ *   5. Menu bar updates from "Pair this Mac" → "✓ Paired".
  */
 
 const { app, Tray, Menu, shell, nativeImage, Notification } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 
-// ─── Single-instance lock ─────────────────────────────────────────
-// Without this, double-clicking the .app while it's already running
-// would spawn a second Node process trying to bind :3001 — second
-// instance crashes with EADDRINUSE and the user just sees nothing.
+// ─── Single-instance lock ────────────────────────────────────────────────
+// Double-launching would spawn a second Node trying to bind :3001 → crash.
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
   return;
 }
 
-// Hide the Dock icon — this is a menu-bar-only app. The Dock would
-// suggest there's a window to switch to, which there isn't.
+// Hide the Dock icon — this is a menu-bar-only app.
 app.dock?.hide();
+
+const PORT = parseInt(process.env.PORT || "3001", 10);
+const BRIDGE_API_BASE = `http://localhost:${PORT}`;
 
 let tray = null;
 let serverModule = null;
 let serverStartedAt = null;
 let lastError = null;
 
+// Mirror of /api/bridge/state — re-polled every 3s.
+let bridgeState = {
+  state: "uninit",
+  detail: null,
+  installId: null,
+  userId: null,
+  pairCode: null,
+  pairUrl: null,
+};
+
+// True once we've kicked off the auto-pair flow this app launch.
+// Prevents us from opening the browser repeatedly while the user is
+// signing in. Reset only if pairing fails OR the user explicitly
+// clicks "Pair this Mac" again.
+let autoPairTriggered = false;
+
 function trayIconPath() {
-  // For dev runs (`npm run electron:dev`), __dirname is .../electron/.
-  // For packaged builds, files inside asar are read via electron's
-  // virtual FS the same way. We ship a template icon (white outline on
-  // transparent) so macOS auto-inverts it for dark/light menu bar.
   const candidate = path.join(__dirname, "tray-iconTemplate.png");
   if (fs.existsSync(candidate)) return candidate;
-  // Fallback to the bundle's main icon if the tray template is missing.
   return path.join(__dirname, "..", "build", "icon.png");
 }
 
 function buildTrayImage() {
   const img = nativeImage.createFromPath(trayIconPath());
-  // Resize to 18x18 (standard menu-bar size on Retina, auto-scales).
   return img.isEmpty()
     ? nativeImage.createEmpty()
     : img.resize({ width: 18, height: 18 });
@@ -63,8 +84,6 @@ function buildTrayImage() {
 
 function startServer() {
   try {
-    // Requiring server.js runs its app.listen() side effect. We hold the
-    // module handle so the GC doesn't tear it down.
     serverModule = require(path.join(__dirname, "..", "server.js"));
     serverStartedAt = Date.now();
     lastError = null;
@@ -77,83 +96,198 @@ function startServer() {
 }
 
 function showError(msg) {
-  // Non-blocking notification so the user actually sees errors even
-  // when there's no main window.
   try {
     new Notification({ title: "Veronum Bridge", body: msg }).show();
   } catch {}
 }
 
-function rebuildMenu() {
-  const items = [
-    {
-      label: serverStartedAt
-        ? `● Running on localhost:3001`
-        : lastError
-        ? `⚠ Server stopped (${lastError.message.slice(0, 40)})`
-        : "Starting…",
-      enabled: false,
-    },
-    { type: "separator" },
-    {
-      label: "Open chat (localhost:3001)",
-      enabled: !!serverStartedAt,
-      click: () => shell.openExternal("http://localhost:3001/"),
-    },
-    {
-      label: "Open chat (cloud)",
-      enabled: !!serverStartedAt,
-      // For the MVP, the cloud relay isn't deployed yet, so this opens
-      // the marketing site. Once chat.thetoolswebsite.com is live this
-      // becomes the primary entry point.
-      click: () => shell.openExternal("https://www.thetoolswebsite.com/"),
-    },
-    { type: "separator" },
-    {
-      label: "Pause bridge",
-      enabled: !!serverStartedAt,
-      // We don't actually have a clean shutdown handle on the Express
-      // server today — restart is the same operation. Pause = quit
-      // tray icon and re-launch on demand. MVP simplification.
-      click: () => {
-        app.relaunch();
-        app.quit();
-      },
-    },
-    { type: "separator" },
-    {
-      label: "About Veronum Bridge",
-      click: () => shell.openExternal("https://github.com/DylanWain/veronum-bridge"),
-    },
-    { label: "Quit Veronum Bridge", click: () => app.quit() },
-  ];
-  tray.setContextMenu(Menu.buildFromTemplate(items));
-  tray.setToolTip(
-    serverStartedAt
-      ? "Veronum Bridge — running"
-      : lastError
-      ? `Veronum Bridge — error: ${lastError.message}`
-      : "Veronum Bridge — starting",
-  );
+function notify(title, body) {
+  try {
+    new Notification({ title, body }).show();
+  } catch {}
 }
 
+// ─── Pair flow ────────────────────────────────────────────────────────────
+// Wraps POST /api/bridge/begin-pair and openExternal on the returned URL.
+async function beginPairFlow() {
+  if (!serverStartedAt) return;
+  try {
+    const res = await fetch(`${BRIDGE_API_BASE}/api/bridge/begin-pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.pair_url) {
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    console.log(`[bridge] opening pair URL: ${body.pair_url}`);
+    shell.openExternal(body.pair_url);
+    notify(
+      "Veronum Bridge",
+      "We opened the pairing page in your browser. Sign in there to finish pairing.",
+    );
+  } catch (e) {
+    console.warn(`[bridge] beginPairFlow failed: ${e.message}`);
+    showError(`Couldn't start pairing: ${e.message}`);
+    autoPairTriggered = false; // allow another attempt
+  }
+}
+
+// Triggered on every state poll. We only auto-open the browser ONCE per
+// app launch, and only when we've actually seen the "unpaired" state
+// from the daemon (so we don't blast the browser open during the boot
+// "uninit" phase before bridgeSupabase has even contacted the edge fn).
+async function maybeAutoPair() {
+  if (autoPairTriggered) return;
+  if (bridgeState.state !== "unpaired") return;
+  // Skip auto-pair if we're STILL in the boot sub-phase where detail
+  // contains "checking pair state" — wait one more tick to be sure.
+  if ((bridgeState.detail || "").includes("checking")) return;
+  autoPairTriggered = true;
+  console.log("[bridge] first-launch unpaired — auto-opening pair page");
+  await beginPairFlow();
+}
+
+async function unpairFlow() {
+  try {
+    await fetch(`${BRIDGE_API_BASE}/api/bridge/unpair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    autoPairTriggered = false; // they can re-pair from a clean state
+    notify("Veronum Bridge", "This Mac is no longer paired.");
+  } catch (e) {
+    showError(`Couldn't unpair: ${e.message}`);
+  }
+}
+
+// ─── State polling ────────────────────────────────────────────────────────
+async function pollBridgeState() {
+  if (!serverStartedAt) return;
+  try {
+    const res = await fetch(`${BRIDGE_API_BASE}/api/bridge/state`);
+    if (!res.ok) return;
+    const body = await res.json();
+    bridgeState = body || bridgeState;
+    rebuildMenu();
+    maybeAutoPair();
+  } catch {
+    // Server probably restarting — leave last-known state in place.
+  }
+}
+
+// ─── Menu rendering ───────────────────────────────────────────────────────
+function statusLabel() {
+  if (!serverStartedAt) {
+    if (lastError) return `⚠ Server stopped (${lastError.message.slice(0, 40)})`;
+    return "Starting…";
+  }
+  switch (bridgeState.state) {
+    case "connected":
+      return `✓ Paired — Mac online`;
+    case "pairing":
+      return bridgeState.pairCode
+        ? `Pairing — code ${bridgeState.pairCode}`
+        : "Pairing…";
+    case "unpaired":
+      return "Not paired";
+    case "error":
+      return `⚠ Bridge error (${(bridgeState.detail || "").slice(0, 40)})`;
+    default:
+      return `● Running on localhost:${PORT}`;
+  }
+}
+
+function rebuildMenu() {
+  if (!tray) return;
+  const paired = bridgeState.state === "connected";
+  const pairing = bridgeState.state === "pairing";
+  const unpaired = bridgeState.state === "unpaired" || bridgeState.state === "error";
+
+  const items = [
+    { label: statusLabel(), enabled: false },
+  ];
+
+  // Pair / unpair section
+  if (paired) {
+    items.push({ type: "separator" });
+    items.push({
+      label: "Unpair this Mac",
+      click: () => unpairFlow(),
+    });
+  } else if (unpaired) {
+    items.push({ type: "separator" });
+    items.push({
+      label: "Pair this Mac",
+      enabled: !!serverStartedAt,
+      click: () => {
+        autoPairTriggered = false; // explicit retry resets the flag
+        beginPairFlow();
+      },
+    });
+  } else if (pairing) {
+    items.push({ type: "separator" });
+    items.push({
+      label: "Re-open pairing page",
+      enabled: !!serverStartedAt && !!bridgeState.pairUrl,
+      click: () => {
+        if (bridgeState.pairUrl) shell.openExternal(bridgeState.pairUrl);
+      },
+    });
+  }
+
+  // Open chat — always visible when server is up.
+  items.push({ type: "separator" });
+  items.push({
+    label: "Open chat (web)",
+    enabled: !!serverStartedAt,
+    click: () => shell.openExternal("https://www.thetoolswebsite.com/chat"),
+  });
+  items.push({
+    label: "Open chat (localhost)",
+    enabled: !!serverStartedAt,
+    click: () => shell.openExternal(`http://localhost:${PORT}/`),
+  });
+
+  // Maintenance
+  items.push({ type: "separator" });
+  items.push({
+    label: "Restart bridge",
+    enabled: !!serverStartedAt,
+    click: () => {
+      app.relaunch();
+      app.quit();
+    },
+  });
+  items.push({ type: "separator" });
+  items.push({
+    label: "About Veronum Bridge",
+    click: () => shell.openExternal("https://github.com/DylanWain/veronum-bridge"),
+  });
+  items.push({ label: "Quit Veronum Bridge", click: () => app.quit() });
+
+  tray.setContextMenu(Menu.buildFromTemplate(items));
+  tray.setToolTip(`Veronum Bridge — ${statusLabel()}`);
+}
+
+// ─── Lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
   tray = new Tray(buildTrayImage());
   rebuildMenu();
   startServer();
   rebuildMenu();
-  // Re-render the menu every 5s so the "started ago" label and any
-  // late-arriving errors surface without user action.
-  setInterval(rebuildMenu, 5000);
+  // Poll state every 3s so the menu reflects current pair state and the
+  // auto-pair-on-first-launch fires within ~3s of the daemon discovering
+  // it's unpaired (which takes ~1s after startServer).
+  setInterval(pollBridgeState, 3000);
 });
 
-// Keep the app alive even with no windows — that's the point of a
-// menu-bar app.
 app.on("window-all-closed", (e) => {
   e.preventDefault();
 });
 
-// Cleanly shut down the Express server on quit.
 app.on("before-quit", () => {
   try {
     serverModule?.shutdown?.();
