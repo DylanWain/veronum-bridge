@@ -42,6 +42,12 @@ app.use((req, _res, next) => {
 // gets attached to the HTTP server below, after app.listen() returns it.
 const { mountPreviewProxy } = require("./lib/previewProxy");
 
+// File tree + reader endpoints (/api/files/tree + /api/files/read).
+// Sandboxed under the session's cwd (which the browser already knows
+// from state.project.cwd). See lib/projectFiles.js.
+const { mountProjectFiles } = require("./lib/projectFiles");
+mountProjectFiles(app);
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // ─── PROJECT + SESSION LISTING ─────────────────────────────────────

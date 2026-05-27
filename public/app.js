@@ -222,6 +222,10 @@ async function pickProject(editor, project) {
   state.editor = editor;
   state.project = project;
   state.sessionId = null;
+  // Tell the workspace panel (Files tab) to re-fetch the tree for this
+  // new project. Decoupled via a CustomEvent so the panel module
+  // doesn't need a direct reference into this scope.
+  document.dispatchEvent(new CustomEvent("veronum:session-changed", { detail: { project } }));
   // Highlight in left pane
   document.querySelectorAll("#projects li").forEach((el) => el.classList.remove("active"));
   document
@@ -972,35 +976,224 @@ micBtn.addEventListener("touchend", (e) => { e.preventDefault(); pttEnd(); }, { 
 micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); }, { passive: false });
 
 
-// ─── Live preview panel ──────────────────────────────────────────────────
-// Opens a slide-over with an iframe pointing at /preview/<port>/, which
-// the daemon proxies to localhost:<port> with HMR-friendly WS support.
-// The port dropdown is auto-populated from /api/preview/ports (lsof on
-// the Mac side). Viewport presets are useful for testing what your dev
-// site looks like at phone / tablet widths without dragging the window.
+// ─── Workspace panel (Files tab + Preview tab) ──────────────────────────
+// Single button in the topbar opens a slide-over with two surfaces:
+//
+//   Files:    tree of the current session's project (state.project.cwd)
+//             + code viewer with Prism syntax highlight. Default view —
+//             always has SOMETHING to show.
+//   Preview:  iframe proxied through /preview/<port>/ to a localhost
+//             dev server (Vite/Next/CRA…). Shows when the user clicks
+//             the tab AND has a dev server running.
+//
+// Why Files default: every Claude/Cursor session has a project dir on
+// disk; opening Preview-first when there's nothing to preview surfaces
+// a confusing empty state. Files always has the code from the session
+// we're already chatting about.
 (() => {
   const els = {
     btn: document.getElementById("preview-btn"),
     panel: document.getElementById("preview-panel"),
-    portSelect: document.getElementById("preview-port"),
-    empty: document.getElementById("preview-empty"),
-    frameWrap: document.getElementById("preview-frame-wrap"),
-    frame: document.getElementById("preview-frame"),
     close: document.getElementById("preview-close"),
     reload: document.getElementById("preview-reload"),
+    tabs: document.querySelectorAll(".preview-tab"),
+    bodies: document.querySelectorAll(".preview-body"),
+    // Files tab
+    tree: document.getElementById("files-tree"),
+    viewer: document.getElementById("files-viewer"),
+    // Preview tab
+    portSelect: document.getElementById("preview-port"),
+    previewEmpty: document.getElementById("preview-empty"),
+    frameWrap: document.getElementById("preview-frame-wrap"),
+    frame: document.getElementById("preview-frame"),
     vps: document.querySelectorAll(".preview-vp"),
   };
-  if (!els.btn || !els.panel) return; // markup not present
+  if (!els.btn || !els.panel) return;
 
-  // Heuristic priority: common dev-server ports get auto-selected
-  // before random ones. Sourced from the major framework defaults.
+  let activeTab = "files";
+  let activeFilePath = null;
+  let prismLoading = null;
+
+  // ─── Prism.js lazy load (only when the first file is opened) ─────────
+  function ensurePrism() {
+    if (window.Prism) return Promise.resolve();
+    if (prismLoading) return prismLoading;
+    prismLoading = new Promise((resolve) => {
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js";
+      s.onload = () => {
+        const a = document.createElement("script");
+        a.src = "https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js";
+        a.onload = () => resolve();
+        a.onerror = () => resolve();
+        document.body.appendChild(a);
+      };
+      s.onerror = () => resolve();
+      document.body.appendChild(s);
+    });
+    return prismLoading;
+  }
+
+  // ─── Tab switching ───────────────────────────────────────────────────
+  function setTab(tab) {
+    activeTab = tab;
+    els.panel.dataset.tab = tab;
+    els.tabs.forEach((b) => {
+      const on = b.dataset.tab === tab;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    els.bodies.forEach((b) => { b.hidden = b.dataset.tab !== tab; });
+    if (tab === "preview") loadPorts();
+  }
+  els.tabs.forEach((b) => b.addEventListener("click", () => setTab(b.dataset.tab)));
+
+  // ─── Files tab ───────────────────────────────────────────────────────
+  function currentCwd() {
+    // state lives in the outer app.js closure — we read via the global
+    // 'state' if exposed, otherwise fall back to scraping the session
+    // pill (this script is appended to app.js so it shares scope).
+    return (typeof state !== "undefined" && state?.project?.cwd) || null;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  }
+
+  // Render one level of children. Returns the <ul> element for caller
+  // to insert into the tree.
+  function renderEntries(entries, depth) {
+    const wrap = document.createElement("div");
+    wrap.className = "files-children";
+    wrap.style.display = depth === 0 ? "block" : "none";
+    for (const entry of entries) {
+      const row = document.createElement("div");
+      row.className = `files-row ${entry.type}`;
+      row.style.paddingLeft = `${8 + depth * 14}px`;
+      row.dataset.rel = entry.rel;
+      row.dataset.type = entry.type;
+      row.innerHTML = `<span class="files-row-icon"></span><span class="files-row-name">${escapeHtml(entry.name)}</span>`;
+      wrap.appendChild(row);
+      if (entry.type === "dir") {
+        const childWrap = document.createElement("div");
+        childWrap.className = "files-children";
+        childWrap.dataset.rel = entry.rel;
+        childWrap.dataset.loaded = "0";
+        wrap.appendChild(childWrap);
+      }
+    }
+    return wrap;
+  }
+
+  async function fetchTree(rel) {
+    const cwd = currentCwd();
+    if (!cwd) return null;
+    const url = `/api/files/tree?cwd=${encodeURIComponent(cwd)}&rel=${encodeURIComponent(rel || ".")}`;
+    const r = await fetch(url).then((x) => x.json());
+    if (!r.ok) throw new Error(r.error || "tree fetch failed");
+    return r.entries || [];
+  }
+
+  async function expandDir(row, childWrap) {
+    if (childWrap.dataset.loaded === "1") {
+      row.classList.toggle("open");
+      childWrap.style.display = row.classList.contains("open") ? "block" : "none";
+      return;
+    }
+    childWrap.innerHTML = `<div class="files-row" style="padding-left:${8 + (parseInt(row.style.paddingLeft) / 14) + 14}px"><span class="dim">loading…</span></div>`;
+    childWrap.dataset.loaded = "1";
+    try {
+      const entries = await fetchTree(row.dataset.rel);
+      childWrap.innerHTML = "";
+      const sub = renderEntries(entries, (parseInt(row.style.paddingLeft) / 14));
+      sub.style.display = "block";
+      // Move sub's children into childWrap directly to flatten the wrapper.
+      while (sub.firstChild) childWrap.appendChild(sub.firstChild);
+      row.classList.add("open");
+    } catch (e) {
+      childWrap.innerHTML = `<div class="files-row"><span class="dim">error: ${escapeHtml(e.message)}</span></div>`;
+    }
+  }
+
+  async function openFile(rel) {
+    activeFilePath = rel;
+    // Mark active row
+    els.tree.querySelectorAll(".files-row.active").forEach((r) => r.classList.remove("active"));
+    const row = els.tree.querySelector(`.files-row[data-rel="${rel.replace(/"/g, '\\"')}"]`);
+    row?.classList.add("active");
+
+    els.viewer.innerHTML = `<div class="files-empty">loading…</div>`;
+    const cwd = currentCwd();
+    if (!cwd) { els.viewer.innerHTML = `<div class="files-empty">No project — open a session first.</div>`; return; }
+    try {
+      const r = await fetch(`/api/files/read?cwd=${encodeURIComponent(cwd)}&rel=${encodeURIComponent(rel)}`).then((x) => x.json());
+      if (!r.ok) {
+        const msg = r.code === "EBINARY" ? "Binary file — not displayed."
+          : r.code === "E2BIG"   ? "File too large to display."
+          : r.error || "Failed to read file.";
+        els.viewer.innerHTML = `<div class="files-empty">${escapeHtml(msg)}</div>`;
+        return;
+      }
+      const sizeKb = (r.size / 1024).toFixed(1);
+      els.viewer.innerHTML = `
+        <div class="files-viewer-head">
+          <span>${escapeHtml(r.filename)}</span>
+          <span class="dim">${escapeHtml(r.language)} · ${sizeKb} KB</span>
+        </div>
+        <pre class="files-viewer-body"><code class="language-${escapeHtml(r.language)}"></code></pre>
+      `;
+      // Insert text content via textContent (safe) then ask Prism to highlight.
+      const codeEl = els.viewer.querySelector("code");
+      codeEl.textContent = r.contents;
+      await ensurePrism();
+      if (window.Prism) window.Prism.highlightElement(codeEl);
+    } catch (e) {
+      els.viewer.innerHTML = `<div class="files-empty">Error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  els.tree.addEventListener("click", (e) => {
+    const row = e.target.closest(".files-row");
+    if (!row || !els.tree.contains(row)) return;
+    if (row.dataset.type === "dir") {
+      const childWrap = row.nextElementSibling;
+      if (childWrap && childWrap.classList.contains("files-children")) {
+        expandDir(row, childWrap);
+      }
+    } else {
+      openFile(row.dataset.rel);
+    }
+  });
+
+  async function loadFilesRoot() {
+    const cwd = currentCwd();
+    if (!cwd) {
+      els.tree.innerHTML = `<div class="files-empty">Open a session to see its project files.</div>`;
+      els.viewer.innerHTML = `<div class="files-empty">No project — open a Claude or Cursor session first.</div>`;
+      return;
+    }
+    els.tree.innerHTML = `<div class="files-empty">loading…</div>`;
+    try {
+      const entries = await fetchTree(".");
+      if (!entries || entries.length === 0) {
+        els.tree.innerHTML = `<div class="files-empty">Empty project directory.</div>`;
+        return;
+      }
+      els.tree.innerHTML = "";
+      const root = renderEntries(entries, 0);
+      root.style.display = "block";
+      while (root.firstChild) els.tree.appendChild(root.firstChild);
+    } catch (e) {
+      els.tree.innerHTML = `<div class="files-empty">Couldn't load tree: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  // ─── Preview tab (dev server iframe) ─────────────────────────────────
   const PRIORITY = [5173, 3000, 8080, 4321, 5000, 8000, 4200, 1234, 9000];
-
   function rankPort(p) {
     const idx = PRIORITY.indexOf(p);
     return idx === -1 ? PRIORITY.length + p : idx;
   }
-
   async function loadPorts() {
     els.portSelect.innerHTML = `<option value="">loading…</option>`;
     try {
@@ -1010,61 +1203,62 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
       );
       if (ports.length === 0) {
         els.portSelect.innerHTML = `<option value="">no dev servers detected</option>`;
+        showPreviewEmpty();
         return;
       }
       els.portSelect.innerHTML = ports
         .map((p) => `<option value="${p.port}">${p.port} · ${p.command}</option>`)
         .join("");
-      // Pick the first (highest-priority) port if nothing was previously chosen.
       if (!els.portSelect.value) {
         els.portSelect.value = String(ports[0].port);
         loadIntoFrame(ports[0].port);
       }
     } catch (e) {
       els.portSelect.innerHTML = `<option value="">discovery failed</option>`;
-      console.warn("[preview] /api/preview/ports failed:", e);
+      showPreviewEmpty();
     }
   }
-
+  function showPreviewEmpty() {
+    els.previewEmpty.hidden = false;
+    els.frameWrap.hidden = true;
+    els.frame.src = "about:blank";
+  }
   function loadIntoFrame(port) {
-    if (!port) {
-      els.empty.hidden = false;
-      els.frameWrap.hidden = true;
-      els.frame.src = "about:blank";
-      return;
-    }
-    els.empty.hidden = true;
+    if (!port) return showPreviewEmpty();
+    els.previewEmpty.hidden = true;
     els.frameWrap.hidden = false;
-    // Trailing slash is important — without it the proxy treats the
-    // request as the bare /preview/<port> path which can confuse the
-    // dev server's relative-URL resolution before <base> takes effect.
     els.frame.src = `/preview/${port}/`;
   }
-
   function setViewport(vp) {
     els.frameWrap.dataset.vp = vp;
     els.vps.forEach((b) => b.classList.toggle("active", b.dataset.vp === vp));
   }
+  els.portSelect?.addEventListener("change", () => loadIntoFrame(els.portSelect.value));
+  els.vps.forEach((b) => b.addEventListener("click", () => setViewport(b.dataset.vp)));
 
+  // ─── Panel open/close ────────────────────────────────────────────────
   els.btn.addEventListener("click", () => {
     const opening = els.panel.hidden;
     els.panel.hidden = !opening;
-    if (opening) loadPorts();
+    if (opening) {
+      setTab("files");
+      loadFilesRoot();
+    }
   });
   els.close.addEventListener("click", () => {
     els.panel.hidden = true;
-    // Stop the iframe so HMR WS doesn't keep banging on the upstream.
-    els.frame.src = "about:blank";
+    els.frame.src = "about:blank"; // stop HMR WS hammering upstream
   });
   els.reload.addEventListener("click", () => {
-    const port = els.portSelect.value;
-    if (port) loadIntoFrame(port);
+    if (activeTab === "files") loadFilesRoot();
+    else if (els.portSelect.value) loadIntoFrame(els.portSelect.value);
   });
-  els.portSelect.addEventListener("change", () => {
-    loadIntoFrame(els.portSelect.value);
-  });
-  els.vps.forEach((b) => b.addEventListener("click", () => setViewport(b.dataset.vp)));
 
-  // Default to full-width on desktop, the empty state shows until a port is chosen.
+  // Re-load the tree when the session changes while the panel is open.
+  document.addEventListener("veronum:session-changed", () => {
+    if (!els.panel.hidden && activeTab === "files") loadFilesRoot();
+  });
+
   setViewport("full");
+  els.panel.dataset.tab = "files";
 })();

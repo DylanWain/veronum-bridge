@@ -766,3 +766,145 @@ button { font-family: inherit; color: inherit; }
   .preview-frame-wrap { padding: 0; }
   .preview-frame { border-radius: 0; }
 }
+
+/* ─── Workspace panel tabs (Files | Preview) ───────────────────────── */
+.preview-tabs {
+  display: inline-flex;
+  border: 1px solid var(--border, rgba(255,255,255,.12));
+  border-radius: 8px;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.preview-tab {
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--border, rgba(255,255,255,.08));
+  color: var(--text-dim, rgba(255,255,255,.6));
+  padding: 5px 14px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.preview-tab:last-child { border-right: 0; }
+.preview-tab:hover { color: var(--text, #fff); }
+.preview-tab.active {
+  background: var(--accent-soft, rgba(167,139,250,.18));
+  color: var(--text, #fff);
+}
+
+/* When the Files tab is active, hide the Preview's port/viewport tools
+ * (they're irrelevant). When Preview is active, show them. JS toggles
+ * the panel's data-tab attribute; CSS responds. */
+.preview-panel[data-tab="files"] #preview-tools { display: none; }
+.preview-panel[data-tab="preview"] #preview-tools { display: flex; }
+
+/* ─── Files tab: split tree + viewer ──────────────────────────────── */
+.preview-body[data-tab="files"] {
+  display: flex;
+  flex-direction: row;
+  padding: 0;
+}
+.files-tree {
+  flex: 0 0 280px;
+  max-width: 50%;
+  overflow: auto;
+  border-right: 1px solid var(--border, rgba(255,255,255,.08));
+  padding: 6px 0;
+  background: var(--bg-elev, rgba(255,255,255,.02));
+  font-size: 13px;
+}
+.files-viewer {
+  flex: 1 1 auto;
+  overflow: auto;
+  background: var(--bg-dim, #0c0c0c);
+  display: flex;
+  flex-direction: column;
+}
+.files-empty {
+  margin: auto;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim, rgba(255,255,255,.55));
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Tree rows: indented folders/files. */
+.files-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px 3px 0;
+  color: var(--text-dim, rgba(255,255,255,.8));
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  white-space: nowrap;
+}
+.files-row:hover {
+  background: var(--bg-elev-hover, rgba(255,255,255,.04));
+  color: var(--text, #fff);
+}
+.files-row.active {
+  background: var(--accent-soft, rgba(167,139,250,.16));
+  color: var(--text, #fff);
+}
+.files-row-icon {
+  width: 14px;
+  text-align: center;
+  flex: 0 0 14px;
+  font-size: 11px;
+  opacity: .65;
+}
+.files-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.files-row.dir > .files-row-icon::before { content: "▸"; }
+.files-row.dir.open > .files-row-icon::before { content: "▾"; }
+.files-row.file > .files-row-icon::before { content: "·"; }
+.files-children { display: none; }
+.files-row.dir.open + .files-children { display: block; }
+
+/* Viewer: header (filename), pre/code body. */
+.files-viewer-head {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.06));
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--text-dim, rgba(255,255,255,.65));
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.files-viewer-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px;
+}
+.files-viewer-body pre {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.files-viewer-body code {
+  font-family: inherit;
+}
+
+/* Mobile: stack tree above viewer instead of side-by-side. Tree gets
+ * a height cap so the viewer always has room. */
+@media (max-width: 720px) {
+  .preview-body[data-tab="files"] {
+    flex-direction: column;
+  }
+  .files-tree {
+    flex: 0 0 auto;
+    max-width: 100%;
+    max-height: 38vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--border, rgba(255,255,255,.08));
+  }
+}
