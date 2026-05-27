@@ -36,17 +36,31 @@ app.use((req, _res, next) => {
   }
   next();
 });
-// Live preview of localhost dev servers (/preview/:port/* + /api/preview/ports).
-// Mounted BEFORE express.static so the /preview/* path doesn't get caught
-// by the static handler. See lib/previewProxy.js. The WS upgrade handler
-// gets attached to the HTTP server below, after app.listen() returns it.
-const { mountPreviewProxy } = require("./lib/previewProxy");
-
 // File tree + reader endpoints (/api/files/tree + /api/files/read).
 // Sandboxed under the session's cwd (which the browser already knows
 // from state.project.cwd). See lib/projectFiles.js.
 const { mountProjectFiles } = require("./lib/projectFiles");
 mountProjectFiles(app);
+
+// Pixel-streaming live preview. Spawns headless Chrome via CDP and
+// pipes JPEG frames over a WebSocket to whatever client (phone, desktop)
+// is connected. Replaces the path-rewriting HTTP proxy approach, which
+// broke against every modern dev server's absolute-URL emissions.
+// See lib/livePreview.js. WS upgrade is attached below after listen().
+const { mountLivePreview } = require("./lib/livePreview");
+
+// Port-discovery endpoint stays — it's useful for the picker UI even
+// though we no longer proxy through /preview/:port. We just need the
+// list of listening ports so the user can pick which one to screencast.
+const { discoverPorts } = require("./lib/previewProxy");
+app.get("/api/preview/ports", async (_req, res) => {
+  try {
+    const ports = await discoverPorts();
+    res.json({ ok: true, ports });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -1269,6 +1283,6 @@ const httpServer = app.listen(PORT, () => {
   }
 });
 
-// Mount preview proxy with the http.Server so WS/HMR upgrades work.
-// Must happen AFTER app.listen() so we have the server handle.
-mountPreviewProxy(app, httpServer);
+// Mount live-preview WebSocket upgrade handler. Must happen AFTER
+// app.listen() so we have the http.Server handle for binding 'upgrade'.
+mountLivePreview(app, httpServer);

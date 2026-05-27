@@ -1001,11 +1001,9 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
     // Files tab
     tree: document.getElementById("files-tree"),
     viewer: document.getElementById("files-viewer"),
-    // Preview tab
+    // Preview tab (canvas-based pixel stream; iframe is gone)
     portSelect: document.getElementById("preview-port"),
     previewEmpty: document.getElementById("preview-empty"),
-    frameWrap: document.getElementById("preview-frame-wrap"),
-    frame: document.getElementById("preview-frame"),
     vps: document.querySelectorAll(".preview-vp"),
   };
   if (!els.btn || !els.panel) return;
@@ -1205,12 +1203,181 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
     }
   }
 
-  // ─── Preview tab (dev server iframe) ─────────────────────────────────
+  // ─── Preview tab (pixel-streamed canvas) ─────────────────────────────
+  // We replaced the old iframe-with-HTTP-proxy approach because dev
+  // servers (Vite/Next/CRA) emit absolute paths that fight any path
+  // rewriting we do. Instead, the daemon launches a headless Chrome on
+  // the Mac pointed at the dev server URL, and streams JPEG frames
+  // over a WebSocket. The dev server runs unmodified.
   const PRIORITY = [5173, 3000, 8080, 4321, 5000, 8000, 4200, 1234, 9000];
   function rankPort(p) {
     const idx = PRIORITY.indexOf(p);
     return idx === -1 ? PRIORITY.length + p : idx;
   }
+
+  // Refs to the new canvas/stage elements (replaces frameWrap/frame).
+  const stageEl = document.getElementById("preview-stage");
+  const canvasEl = document.getElementById("preview-canvas");
+  const statusEl = document.getElementById("preview-status");
+
+  let previewWs = null;
+  let previewWsTimer = null;
+  let lastFrameW = 0;
+  let lastFrameH = 0;
+
+  function setPreviewStatus(text, autoHideMs = 0) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.dataset.visible = "1";
+    if (autoHideMs) {
+      clearTimeout(setPreviewStatus._t);
+      setPreviewStatus._t = setTimeout(() => { statusEl.dataset.visible = "0"; }, autoHideMs);
+    }
+  }
+
+  function showPreviewEmpty() {
+    els.previewEmpty.hidden = false;
+    if (stageEl) stageEl.hidden = true;
+    closePreviewWs();
+  }
+
+  function closePreviewWs() {
+    if (previewWsTimer) { clearTimeout(previewWsTimer); previewWsTimer = null; }
+    if (previewWs) {
+      try { previewWs.close(); } catch {}
+      previewWs = null;
+    }
+  }
+
+  // Render a base64 JPEG into the canvas, adjusting its intrinsic size
+  // to match the frame so coordinates map 1:1 to the dev server's view.
+  function paintFrame(b64) {
+    const img = new Image();
+    img.onload = () => {
+      if (img.width !== lastFrameW || img.height !== lastFrameH) {
+        canvasEl.width = img.width;
+        canvasEl.height = img.height;
+        lastFrameW = img.width;
+        lastFrameH = img.height;
+      }
+      const ctx = canvasEl.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+    };
+    img.src = `data:image/jpeg;base64,${b64}`;
+  }
+
+  function openPreviewStream(port) {
+    closePreviewWs();
+    els.previewEmpty.hidden = true;
+    if (stageEl) stageEl.hidden = false;
+    setPreviewStatus("connecting…");
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `http://localhost:${port}/`;
+    const wsUrl = `${protocol}//${window.location.host}/api/preview/stream?url=${encodeURIComponent(url)}`;
+    const ws = new WebSocket(wsUrl);
+    previewWs = ws;
+    ws.onopen = () => setPreviewStatus("waiting for first frame…");
+    ws.onmessage = (e) => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      if (msg.type === "frame") {
+        if (statusEl.dataset.visible === "1") {
+          statusEl.dataset.visible = "0";
+        }
+        paintFrame(msg.data);
+      } else if (msg.type === "ready") {
+        setPreviewStatus(`launching headless Chrome → ${msg.url}`, 4000);
+      } else if (msg.type === "error") {
+        setPreviewStatus(`error: ${msg.message}`);
+      } else if (msg.type === "ended") {
+        setPreviewStatus(`stream ended: ${msg.reason || "unknown"}`);
+      }
+    };
+    ws.onerror = () => setPreviewStatus("connection error");
+    ws.onclose = () => {
+      if (previewWs === ws) {
+        setPreviewStatus("disconnected — click reload to reconnect");
+      }
+    };
+  }
+
+  // Convert a pointer event on the canvas to JPEG-frame coordinates.
+  // The canvas element is scaled by CSS to fit the panel; we map back
+  // to the canvas's intrinsic pixel dimensions so the daemon clicks at
+  // the right spot in the headless Chrome's viewport.
+  function eventToFrameCoords(e) {
+    const rect = canvasEl.getBoundingClientRect();
+    const xCss = (e.clientX ?? e.touches?.[0]?.clientX ?? 0) - rect.left;
+    const yCss = (e.clientY ?? e.touches?.[0]?.clientY ?? 0) - rect.top;
+    const scaleX = canvasEl.width / rect.width;
+    const scaleY = canvasEl.height / rect.height;
+    return { x: xCss * scaleX, y: yCss * scaleY };
+  }
+
+  function sendInput(event) {
+    if (!previewWs || previewWs.readyState !== WebSocket.OPEN) return;
+    try { previewWs.send(JSON.stringify(event)); } catch {}
+  }
+
+  // Touch / mouse / wheel / key handlers on the canvas. These get
+  // translated daemon-side into CDP Input.dispatch* calls so the
+  // headless Chrome thinks a real user is interacting with it.
+  if (canvasEl) {
+    canvasEl.addEventListener("mousedown", (e) => {
+      const { x, y } = eventToFrameCoords(e);
+      sendInput({ type: "mousePressed", x, y, button: "left", clickCount: 1 });
+      canvasEl.focus();
+    });
+    canvasEl.addEventListener("mouseup", (e) => {
+      const { x, y } = eventToFrameCoords(e);
+      sendInput({ type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+    });
+    canvasEl.addEventListener("mousemove", (e) => {
+      // Throttle to avoid flooding the WS with mousemove deltas.
+      if (e.buttons === 0 && !canvasEl._hoverThrottle) return;
+      canvasEl._hoverThrottle = true;
+      setTimeout(() => { canvasEl._hoverThrottle = false; }, 40);
+      const { x, y } = eventToFrameCoords(e);
+      sendInput({ type: "mouseMoved", x, y });
+    });
+    canvasEl.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const { x, y } = eventToFrameCoords(e);
+      sendInput({ type: "mouseWheel", x, y, deltaX: e.deltaX, deltaY: e.deltaY });
+    }, { passive: false });
+    // Touch handlers (phone). Translate to mousePressed/Released so the
+    // daemon doesn't need separate touch logic.
+    canvasEl.addEventListener("touchstart", (e) => {
+      e.preventDefault();
+      const { x, y } = eventToFrameCoords(e);
+      sendInput({ type: "mousePressed", x, y, button: "left", clickCount: 1 });
+    }, { passive: false });
+    canvasEl.addEventListener("touchend", (e) => {
+      e.preventDefault();
+      const t = e.changedTouches?.[0];
+      const rect = canvasEl.getBoundingClientRect();
+      const x = ((t?.clientX ?? 0) - rect.left) * (canvasEl.width / rect.width);
+      const y = ((t?.clientY ?? 0) - rect.top) * (canvasEl.height / rect.height);
+      sendInput({ type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+    }, { passive: false });
+    canvasEl.addEventListener("touchmove", (e) => {
+      e.preventDefault();
+      const { x, y } = eventToFrameCoords(e);
+      sendInput({ type: "mouseMoved", x, y });
+    }, { passive: false });
+    canvasEl.addEventListener("keydown", (e) => {
+      e.preventDefault();
+      sendInput({
+        type: "keyDown", key: e.key, code: e.code,
+        text: e.key.length === 1 ? e.key : "",
+      });
+    });
+    canvasEl.addEventListener("keyup", (e) => {
+      e.preventDefault();
+      sendInput({ type: "keyUp", key: e.key, code: e.code });
+    });
+  }
+
   async function loadPorts() {
     els.portSelect.innerHTML = `<option value="">loading…</option>`;
     try {
@@ -1223,34 +1390,37 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
         showPreviewEmpty();
         return;
       }
+      // Remember the previously-selected port (if any) so a Files-tab
+      // detour doesn't drop the connection. If no prior selection, pick
+      // the highest-priority port (Vite=5173, Next=3000, etc).
+      const priorPort = els.portSelect.value;
       els.portSelect.innerHTML = ports
         .map((p) => `<option value="${p.port}">${p.port} · ${p.command}</option>`)
         .join("");
-      if (!els.portSelect.value) {
-        els.portSelect.value = String(ports[0].port);
-        loadIntoFrame(ports[0].port);
-      }
+      const targetPort = priorPort && ports.some((p) => String(p.port) === priorPort)
+        ? priorPort
+        : String(ports[0].port);
+      els.portSelect.value = targetPort;
+      // Always (re-)open the stream after population. The browser
+      // auto-selects the first <option> when innerHTML is replaced,
+      // which made `!els.portSelect.value` falsy and our prior guard
+      // skipped the connect call — leaving the user stuck on the
+      // "connecting…" placeholder forever.
+      openPreviewStream(targetPort);
     } catch (e) {
       els.portSelect.innerHTML = `<option value="">discovery failed</option>`;
       showPreviewEmpty();
     }
   }
-  function showPreviewEmpty() {
-    els.previewEmpty.hidden = false;
-    els.frameWrap.hidden = true;
-    els.frame.src = "about:blank";
-  }
-  function loadIntoFrame(port) {
-    if (!port) return showPreviewEmpty();
-    els.previewEmpty.hidden = true;
-    els.frameWrap.hidden = false;
-    els.frame.src = `/preview/${port}/`;
-  }
+
   function setViewport(vp) {
-    els.frameWrap.dataset.vp = vp;
+    if (stageEl) stageEl.dataset.vp = vp;
     els.vps.forEach((b) => b.classList.toggle("active", b.dataset.vp === vp));
   }
-  els.portSelect?.addEventListener("change", () => loadIntoFrame(els.portSelect.value));
+  els.portSelect?.addEventListener("change", () => {
+    if (els.portSelect.value) openPreviewStream(els.portSelect.value);
+    else showPreviewEmpty();
+  });
   els.vps.forEach((b) => b.addEventListener("click", () => setViewport(b.dataset.vp)));
 
   // ─── Panel open/close ────────────────────────────────────────────────
@@ -1264,11 +1434,11 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
   });
   els.close.addEventListener("click", () => {
     els.panel.hidden = true;
-    els.frame.src = "about:blank"; // stop HMR WS hammering upstream
+    closePreviewWs(); // tear down the screencast stream when panel closes
   });
   els.reload.addEventListener("click", () => {
     if (activeTab === "files") loadFilesRoot();
-    else if (els.portSelect.value) loadIntoFrame(els.portSelect.value);
+    else if (els.portSelect.value) openPreviewStream(els.portSelect.value);
   });
 
   // Re-load the tree when the session changes while the panel is open.

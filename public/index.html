@@ -92,14 +92,20 @@
       </div>
     </div>
 
-    <!-- Preview tab: iframe to the dev server (or empty state if none). -->
+    <!-- Preview tab: pixel-streamed canvas of a localhost dev server
+         rendered in a hidden Chrome on the Mac. Works identically for
+         localhost web apps (Vite/Next/CRA) and Electron renderers
+         because they're all Chromium under the hood — we capture
+         what's painted, not what's being served. Touch/click events
+         flow back over the same WebSocket and become CDP Input events. -->
     <div class="preview-body" data-tab="preview" hidden>
       <div id="preview-empty" class="preview-empty">
-        <p>No dev server detected on this Mac.</p>
-        <p class="dim">Start one with <code>npm run dev</code> in your project, then re-open this panel.</p>
+        <p>No dev server detected.</p>
+        <p class="dim">Start one with <code>npm run dev</code> in your project, then click reload above.</p>
       </div>
-      <div id="preview-frame-wrap" class="preview-frame-wrap" hidden>
-        <iframe id="preview-frame" class="preview-frame" title="Live preview"></iframe>
+      <div id="preview-stage" class="preview-stage" hidden>
+        <canvas id="preview-canvas" class="preview-canvas" tabindex="0"></canvas>
+        <div id="preview-status" class="preview-status">connecting…</div>
       </div>
     </div>
   </div>
