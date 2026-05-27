@@ -36,6 +36,12 @@ app.use((req, _res, next) => {
   }
   next();
 });
+// Live preview of localhost dev servers (/preview/:port/* + /api/preview/ports).
+// Mounted BEFORE express.static so the /preview/* path doesn't get caught
+// by the static handler. See lib/previewProxy.js. The WS upgrade handler
+// gets attached to the HTTP server below, after app.listen() returns it.
+const { mountPreviewProxy } = require("./lib/previewProxy");
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // ─── PROJECT + SESSION LISTING ─────────────────────────────────────
@@ -1247,7 +1253,7 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
   console.log(`✓ Veronum chat localhost running at http://localhost:${PORT}`);
   console.log(`  Claude projects: ${claudeReader.CLAUDE_PROJECTS_DIR}`);
   if (bridgeSupabase) {
@@ -1256,3 +1262,7 @@ app.listen(PORT, () => {
     console.log(`  Bridge: disabled (LOCAL_ONLY=1)`);
   }
 });
+
+// Mount preview proxy with the http.Server so WS/HMR upgrades work.
+// Must happen AFTER app.listen() so we have the server handle.
+mountPreviewProxy(app, httpServer);

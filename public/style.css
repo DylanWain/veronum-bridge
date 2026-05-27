@@ -610,3 +610,159 @@ button { font-family: inherit; color: inherit; }
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ─── Live preview panel ──────────────────────────────────────────────
+ * Slides over the chat from below when the user taps the preview
+ * button in the topbar. iframe inside hits /preview/<port>/ which the
+ * daemon proxies to localhost:<port> with HMR-friendly WS passthrough.
+ * Viewport presets simulate phone / tablet / full-width sizes for
+ * mobile-testing dev sites without leaving the chat UI.
+ */
+.preview-panel {
+  position: fixed;
+  top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px));
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--bg, #141414);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(0);
+  transition: transform 220ms cubic-bezier(.2,.8,.2,1);
+}
+.preview-panel[hidden] {
+  display: none;
+}
+
+.preview-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.08));
+  background: var(--bg-elev, rgba(255,255,255,.02));
+}
+.preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.preview-port-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text, #fff);
+}
+.preview-port-label .dim {
+  color: var(--text-dim, rgba(255,255,255,.55));
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+#preview-port {
+  background: transparent;
+  border: 1px solid var(--border, rgba(255,255,255,.12));
+  border-radius: 8px;
+  color: var(--text, #fff);
+  padding: 4px 8px;
+  font-size: 13px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  min-width: 80px;
+}
+#preview-port:focus {
+  outline: 1px solid var(--accent, #a78bfa);
+  outline-offset: 1px;
+}
+
+.preview-viewport-group {
+  display: inline-flex;
+  border: 1px solid var(--border, rgba(255,255,255,.12));
+  border-radius: 8px;
+  overflow: hidden;
+}
+.preview-vp {
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--border, rgba(255,255,255,.08));
+  color: var(--text-dim, rgba(255,255,255,.6));
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.preview-vp:last-child { border-right: 0; }
+.preview-vp:hover { color: var(--text, #fff); }
+.preview-vp.active {
+  background: var(--accent-soft, rgba(167,139,250,.18));
+  color: var(--text, #fff);
+}
+
+.preview-actions {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.preview-body {
+  flex: 1 1 auto;
+  position: relative;
+  background: var(--bg-dim, #0c0c0c);
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  overflow: auto;
+}
+.preview-empty {
+  margin: auto;
+  text-align: center;
+  padding: 32px;
+  color: var(--text-dim, rgba(255,255,255,.55));
+  font-size: 14px;
+  line-height: 1.6;
+}
+.preview-empty code {
+  background: var(--bg-elev, rgba(255,255,255,.04));
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--text, #fff);
+}
+
+.preview-frame-wrap {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  width: 100%;
+  padding: 14px;
+  box-sizing: border-box;
+}
+.preview-frame-wrap[data-vp="phone"]  { padding-top: 28px; }
+.preview-frame-wrap[data-vp="tablet"] { padding-top: 28px; }
+.preview-frame-wrap[data-vp="full"]   { padding: 0; }
+
+.preview-frame {
+  background: #fff;
+  border: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  box-shadow: 0 4px 24px rgba(0,0,0,.4);
+}
+.preview-frame-wrap[data-vp="phone"]  .preview-frame { width: 390px; max-width: 100%; height: calc(100% - 28px); border-radius: 22px; }
+.preview-frame-wrap[data-vp="tablet"] .preview-frame { width: 820px; max-width: 100%; height: calc(100% - 28px); border-radius: 14px; }
+.preview-frame-wrap[data-vp="full"]   .preview-frame { border-radius: 0; }
+
+/* Mobile: ditch the device-frame padding so phone users get every
+ * available pixel for the preview itself. */
+@media (max-width: 600px) {
+  .preview-head { padding: 8px 10px; gap: 8px; }
+  .preview-controls { gap: 8px; flex-wrap: wrap; }
+  .preview-viewport-group { display: none; } /* phone preset has no value on phone */
+  .preview-frame-wrap { padding: 0; }
+  .preview-frame { border-radius: 0; }
+}

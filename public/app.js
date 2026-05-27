@@ -971,3 +971,100 @@ micBtn.addEventListener("mouseleave", () => { if (voice.holding) pttEnd(); });
 micBtn.addEventListener("touchend", (e) => { e.preventDefault(); pttEnd(); }, { passive: false });
 micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); }, { passive: false });
 
+
+// ─── Live preview panel ──────────────────────────────────────────────────
+// Opens a slide-over with an iframe pointing at /preview/<port>/, which
+// the daemon proxies to localhost:<port> with HMR-friendly WS support.
+// The port dropdown is auto-populated from /api/preview/ports (lsof on
+// the Mac side). Viewport presets are useful for testing what your dev
+// site looks like at phone / tablet widths without dragging the window.
+(() => {
+  const els = {
+    btn: document.getElementById("preview-btn"),
+    panel: document.getElementById("preview-panel"),
+    portSelect: document.getElementById("preview-port"),
+    empty: document.getElementById("preview-empty"),
+    frameWrap: document.getElementById("preview-frame-wrap"),
+    frame: document.getElementById("preview-frame"),
+    close: document.getElementById("preview-close"),
+    reload: document.getElementById("preview-reload"),
+    vps: document.querySelectorAll(".preview-vp"),
+  };
+  if (!els.btn || !els.panel) return; // markup not present
+
+  // Heuristic priority: common dev-server ports get auto-selected
+  // before random ones. Sourced from the major framework defaults.
+  const PRIORITY = [5173, 3000, 8080, 4321, 5000, 8000, 4200, 1234, 9000];
+
+  function rankPort(p) {
+    const idx = PRIORITY.indexOf(p);
+    return idx === -1 ? PRIORITY.length + p : idx;
+  }
+
+  async function loadPorts() {
+    els.portSelect.innerHTML = `<option value="">loading…</option>`;
+    try {
+      const r = await fetch("/api/preview/ports").then((x) => x.json());
+      const ports = (r?.ports || []).slice().sort(
+        (a, b) => rankPort(a.port) - rankPort(b.port),
+      );
+      if (ports.length === 0) {
+        els.portSelect.innerHTML = `<option value="">no dev servers detected</option>`;
+        return;
+      }
+      els.portSelect.innerHTML = ports
+        .map((p) => `<option value="${p.port}">${p.port} · ${p.command}</option>`)
+        .join("");
+      // Pick the first (highest-priority) port if nothing was previously chosen.
+      if (!els.portSelect.value) {
+        els.portSelect.value = String(ports[0].port);
+        loadIntoFrame(ports[0].port);
+      }
+    } catch (e) {
+      els.portSelect.innerHTML = `<option value="">discovery failed</option>`;
+      console.warn("[preview] /api/preview/ports failed:", e);
+    }
+  }
+
+  function loadIntoFrame(port) {
+    if (!port) {
+      els.empty.hidden = false;
+      els.frameWrap.hidden = true;
+      els.frame.src = "about:blank";
+      return;
+    }
+    els.empty.hidden = true;
+    els.frameWrap.hidden = false;
+    // Trailing slash is important — without it the proxy treats the
+    // request as the bare /preview/<port> path which can confuse the
+    // dev server's relative-URL resolution before <base> takes effect.
+    els.frame.src = `/preview/${port}/`;
+  }
+
+  function setViewport(vp) {
+    els.frameWrap.dataset.vp = vp;
+    els.vps.forEach((b) => b.classList.toggle("active", b.dataset.vp === vp));
+  }
+
+  els.btn.addEventListener("click", () => {
+    const opening = els.panel.hidden;
+    els.panel.hidden = !opening;
+    if (opening) loadPorts();
+  });
+  els.close.addEventListener("click", () => {
+    els.panel.hidden = true;
+    // Stop the iframe so HMR WS doesn't keep banging on the upstream.
+    els.frame.src = "about:blank";
+  });
+  els.reload.addEventListener("click", () => {
+    const port = els.portSelect.value;
+    if (port) loadIntoFrame(port);
+  });
+  els.portSelect.addEventListener("change", () => {
+    loadIntoFrame(els.portSelect.value);
+  });
+  els.vps.forEach((b) => b.addEventListener("click", () => setViewport(b.dataset.vp)));
+
+  // Default to full-width on desktop, the empty state shows until a port is chosen.
+  setViewport("full");
+})();
