@@ -30,6 +30,20 @@
       <span id="chat-title" class="session-pill-name">Pick a session</span>
       <span id="status" class="session-pill-meta">loading…</span>
     </button>
+    <button id="save-btn" class="topbar-btn" aria-label="Save version" title="Save version (git commit)">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <path d="M5 3h11l3 3v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="2" fill="none"/>
+        <path d="M8 3v5h7V3" stroke="currentColor" stroke-width="2" fill="none"/>
+        <path d="M7 14h10v6H7z" stroke="currentColor" stroke-width="2" fill="none"/>
+      </svg>
+    </button>
+    <button id="plan-btn" class="topbar-btn" aria-label="Plan & billing" title="Plan & billing">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <rect x="3" y="6" width="18" height="13" rx="2" stroke="currentColor" stroke-width="2" fill="none"/>
+        <path d="M3 10h18" stroke="currentColor" stroke-width="2"/>
+        <path d="M7 15h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </button>
     <button id="preview-btn" class="topbar-btn" aria-label="Preview a dev server" title="Live preview of a localhost dev server">
       <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
         <rect x="3" y="4" width="18" height="13" rx="2" stroke="currentColor" stroke-width="2" fill="none"/>
@@ -56,17 +70,17 @@
       <div class="preview-tabs" role="tablist">
         <button class="preview-tab active" data-tab="files" role="tab" aria-selected="true" type="button">Files</button>
         <button class="preview-tab" data-tab="preview" role="tab" aria-selected="false" type="button">Preview</button>
+        <button class="preview-tab" data-tab="terminal" role="tab" aria-selected="false" type="button">Terminal</button>
+        <button class="preview-tab" data-tab="activity" role="tab" aria-selected="false" type="button">Activity</button>
       </div>
-      <div id="preview-tools" class="preview-controls" data-tab="preview">
-        <label class="preview-port-label">
-          <span class="dim">localhost:</span>
-          <select id="preview-port" aria-label="Dev server port"></select>
-        </label>
-        <div class="preview-viewport-group" role="radiogroup" aria-label="Viewport size">
-          <button class="preview-vp" data-vp="phone"  type="button" aria-label="Phone width">Phone</button>
-          <button class="preview-vp" data-vp="tablet" type="button" aria-label="Tablet width">Tablet</button>
-          <button class="preview-vp active" data-vp="full" type="button" aria-label="Full width">Full</button>
-        </div>
+      <div id="preview-tools" class="preview-controls" data-tab="preview" hidden>
+        <!-- Pixel-stream port picker + viewport sizing are obsolete now
+             that "Preview" opens the real localhost in a new browser
+             tab instead of pixel-streaming a headless Chrome. Kept in
+             markup with `hidden` so the JS that references them keeps
+             working without conditional checks. -->
+        <select id="preview-port" aria-label="Dev server port" hidden></select>
+        <button class="preview-vp" data-vp="full" type="button" hidden></button>
       </div>
       <div class="preview-actions">
         <button id="preview-reload" class="topbar-btn" type="button" aria-label="Reload" title="Reload">
@@ -92,29 +106,93 @@
       </div>
     </div>
 
-    <!-- Preview tab: pixel-streamed canvas of a localhost dev server
-         rendered in a hidden Chrome on the Mac. Works identically for
-         localhost web apps (Vite/Next/CRA) and Electron renderers
-         because they're all Chromium under the hood — we capture
-         what's painted, not what's being served. Touch/click events
-         flow back over the same WebSocket and become CDP Input events. -->
+    <!-- Preview tab: pixel-streamed canvas of THIS session's dev server.
+         When the panel opens for a project that has a `dev` (or start)
+         script in its package.json, we offer a "Start dev server"
+         button that runs `npm run dev` in the project's cwd and points
+         the preview at whatever URL the script announces — so the user
+         sees THEIR app, not whatever random localhost port happened
+         to be listening on the Mac. -->
     <div class="preview-body" data-tab="preview" hidden>
       <div id="preview-empty" class="preview-empty">
-        <p>No dev server detected.</p>
-        <p class="dim">Start one with <code>npm run dev</code> in your project, then click reload above.</p>
+        <p id="preview-empty-title">Loading project…</p>
+        <p id="preview-empty-detail" class="dim"></p>
+        <button id="preview-open-tab" class="preview-open-tab" hidden type="button">
+          Open in new tab →
+        </button>
+        <button id="preview-start-dev" class="preview-start-dev" hidden type="button">
+          Start dev server
+        </button>
+        <button id="preview-open-renderer" class="preview-open-renderer" hidden type="button">
+          Preview renderer →
+        </button>
+        <p id="preview-error" class="preview-error" hidden></p>
       </div>
-      <div id="preview-stage" class="preview-stage" hidden>
-        <canvas id="preview-canvas" class="preview-canvas" tabindex="0"></canvas>
-        <div id="preview-status" class="preview-status">connecting…</div>
+      <!-- Pixel-stream stage retired: kept hidden so the legacy app.js
+           canvas references resolve to real DOM nodes (no NPE) without
+           rendering anything. Preview now opens the real localhost URL
+           in a new browser tab via #preview-open-tab. -->
+      <div id="preview-stage" class="preview-stage" hidden style="display:none">
+        <canvas id="preview-canvas" tabindex="0"></canvas>
+        <div id="preview-status"></div>
+      </div>
+    </div>
+
+    <!-- Activity tab: recent file edits from this session's AI calls
+         plus the in-app editor's saves. Each entry is expandable to a
+         red/green diff and can be given a custom name (persisted to
+         <cwd>/.veronum/edits.json). -->
+    <div class="preview-body" data-tab="activity" hidden>
+      <div class="activity-head">
+        <button id="activity-undo" class="activity-action" type="button" disabled title="Undo last change">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+            <path d="M9 14L4 9l5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            <path d="M4 9h11a5 5 0 0 1 0 10h-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          </svg>
+          <span>Undo</span>
+        </button>
+        <button id="activity-redo" class="activity-action" type="button" disabled title="Redo">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+            <path d="M15 14l5-5-5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            <path d="M20 9H9a5 5 0 0 0 0 10h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          </svg>
+          <span>Redo</span>
+        </button>
+        <button id="activity-refresh" class="topbar-btn" type="button" aria-label="Reload" title="Reload">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-3.5-7.1M21 4v5h-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          </svg>
+        </button>
+        <span id="activity-summary" class="dim">loading…</span>
+      </div>
+      <div id="activity-list" class="activity-list"></div>
+    </div>
+
+    <!-- Terminal tab: real zsh per tab, rooted at session cwd. Each
+         tab in #term-tab-strip is a separate WS connection + xterm
+         instance. xterm.js + fit addon load lazily from CDN the first
+         time this tab is opened. -->
+    <div class="preview-body" data-tab="terminal" hidden>
+      <div class="term-head">
+        <div id="term-tab-strip" class="term-tab-strip"></div>
+        <button id="term-add-btn" class="term-add-btn" type="button" aria-label="New terminal" title="New terminal">+</button>
+      </div>
+      <div id="term-stage" class="term-stage">
+        <div id="term-empty" class="term-empty">
+          <p>Open a session, then tap + above to start a terminal.</p>
+        </div>
       </div>
     </div>
   </div>
 
   <!-- Prism.js — syntax highlighting for the file viewer. Loaded lazily
        from CDN when the panel opens; cached globally so the second
-       file view is instant. -->
-  <link id="prism-css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" media="(prefers-color-scheme: dark)">
-  <link id="prism-css-light" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css" media="(prefers-color-scheme: light)">
+       file view is instant. We force the DARK theme always — the
+       light theme (prism.min.css) was leaking a white code background
+       into Veronum's dark UI on systems set to prefers-color-scheme:
+       light. style.css further pins the bg to var(--bg-dim) so it
+       stays consistent with the rest of the file viewer chrome. -->
+  <link id="prism-css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css">
 
   <!-- Drawer backdrop (mobile only). Tap to close. -->
   <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
@@ -158,6 +236,10 @@
       </section>
       <section id="cursor-projects" class="drawer-section" data-view-of="projects" data-active="true">
         <h3>Cursor</h3>
+        <ul></ul>
+      </section>
+      <section id="vscode-projects" class="drawer-section" data-view-of="projects" data-active="true">
+        <h3>VS Code <span class="dim" style="font-weight:normal">· no chat, just code</span></h3>
         <ul></ul>
       </section>
 
@@ -242,6 +324,72 @@
 
     <div id="voice-status" class="voice-status" hidden></div>
   </main>
+
+  <!-- Plan & billing modal. Slides up from the bottom on mobile,
+       centers on desktop. Opens via #plan-btn (topbar) or whenever a
+       402 response from a dispatch endpoint fires the paywall. -->
+  <div id="billing-modal" class="billing-modal" hidden aria-hidden="true">
+    <div class="billing-backdrop" data-billing-close></div>
+    <div class="billing-sheet" role="dialog" aria-labelledby="billing-title">
+      <button class="billing-close" type="button" aria-label="Close" data-billing-close>
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path d="M6 6l12 12M6 18L18 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
+        </svg>
+      </button>
+      <h2 id="billing-title" class="billing-title">Choose your plan</h2>
+      <div class="billing-actions">
+        <button class="billing-cta billing-primary" type="button" data-billing-action="subscribe">
+          Subscribe — $25 / month
+        </button>
+        <button class="billing-cta billing-secondary" type="button" data-billing-action="payg">
+          Pay-as-you-go (3× metered)
+        </button>
+        <button id="billing-manage" class="billing-cta billing-tertiary" type="button" data-billing-action="manage" hidden>
+          Manage subscription →
+        </button>
+      </div>
+      <p class="billing-note">
+        $25/mo plan covers $15 of API at 1× — overage at 2×. PAYG is no
+        monthly fee, billed at 3× as you go. Cancel anytime. Each button
+        opens Stripe Checkout.
+      </p>
+      <p id="billing-error" class="billing-error" hidden></p>
+    </div>
+  </div>
+
+  <!-- Save version modal. Top half: "Save this version" form with a
+       name field. Bottom half: list of past versions, each with a
+       Revert button. Both share the billing-modal styling so it
+       feels native. -->
+  <div id="version-modal" class="billing-modal" hidden aria-hidden="true">
+    <div class="billing-backdrop" data-version-close></div>
+    <div class="billing-sheet" role="dialog" aria-labelledby="version-title">
+      <button class="billing-close" type="button" aria-label="Close" data-version-close>
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path d="M6 6l12 12M6 18L18 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
+        </svg>
+      </button>
+      <h2 id="version-title" class="billing-title">Versions</h2>
+      <div class="version-save-row">
+        <input id="version-name" type="text" placeholder="Name this version (e.g. 'added dark mode')" />
+        <button id="version-save-btn" type="button">Save</button>
+      </div>
+      <p id="version-msg" class="billing-note" hidden></p>
+      <div id="version-remote" class="version-remote" hidden></div>
+      <div class="version-divider">Previous versions</div>
+      <div id="version-list" class="version-list">
+        <p class="billing-note">loading…</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Over-quota lockout banner. Renders above the composer when a
+       402 fires from any dispatch endpoint; composer is disabled at the
+       same time. Click "Subscribe →" opens #billing-modal. -->
+  <div id="billing-paywall" class="billing-paywall" hidden>
+    <span id="billing-paywall-message">Subscribe to keep using Veronum.</span>
+    <button class="billing-paywall-cta" type="button">Subscribe →</button>
+  </div>
 
   <script src="/app.js"></script>
 </body>

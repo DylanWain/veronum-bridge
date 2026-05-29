@@ -797,6 +797,94 @@ button { font-family: inherit; color: inherit; }
 }
 .preview-status[data-visible="1"] { opacity: 1; }
 
+/* "Start dev server" CTA on the Preview tab empty state.
+ * Shown when the session's project has a dev script but the server
+ * isn't running. Click → spawns it server-side, awaits a URL, opens
+ * the canvas. */
+.preview-start-dev {
+  display: inline-block;
+  margin-top: 18px;
+  background: var(--accent, #a78bfa);
+  color: var(--bg, #0e0d12);
+  font-weight: 500;
+  font-size: 14px;
+  font-family: inherit;
+  padding: 10px 22px;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: opacity 150ms;
+}
+.preview-start-dev:hover { opacity: .9; }
+.preview-start-dev:disabled { opacity: .55; cursor: progress; }
+
+/* "Open in new tab" — shown once the session's dev server is running.
+ * Clicking hands off to the OS browser at the real URL so users get
+ * native interaction speed rather than a pixel stream. */
+.preview-open-tab {
+  display: inline-block;
+  margin-top: 18px;
+  background: var(--accent, #a78bfa);
+  color: var(--bg, #0e0d12);
+  font-weight: 500;
+  font-size: 14px;
+  font-family: inherit;
+  padding: 10px 22px;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: opacity 150ms;
+}
+.preview-open-tab:hover { opacity: .9; }
+.preview-open-tab:disabled { opacity: .55; cursor: progress; }
+
+/* "Preview renderer" — secondary CTA, shown next to "Launch app on Mac"
+ * for Electron projects so phones (which can't display a native window)
+ * can still view the renderer HTML/CSS/JS via the tunnel proxy. Same
+ * shape as preview-open-tab but a muted "secondary" style so users see
+ * it as the alternate path, not the primary one on desktop. */
+.preview-open-renderer {
+  display: inline-block;
+  margin-top: 12px;
+  margin-left: 8px;
+  background: transparent;
+  color: var(--accent, #a78bfa);
+  border: 1px solid var(--accent, #a78bfa);
+  font-weight: 500;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 9px 18px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: opacity 150ms;
+}
+.preview-open-renderer:hover { opacity: .85; }
+.preview-open-renderer:disabled { opacity: .55; cursor: progress; }
+
+/* `display: inline-block` on the buttons above beats the HTML `hidden`
+ * attribute in CSS specificity, so they'd stay visible after we set
+ * .hidden=true from JS. Force the spec-correct behavior. */
+.preview-open-tab[hidden],
+.preview-start-dev[hidden],
+.preview-open-renderer[hidden],
+.preview-error[hidden] { display: none !important; }
+
+.preview-error {
+  margin-top: 14px;
+  padding: 8px 12px;
+  background: rgba(239, 68, 68, .12);
+  border: 1px solid rgba(239, 68, 68, .35);
+  border-radius: 8px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: #fda4af;
+  text-align: left;
+  white-space: pre-wrap;
+  max-width: 540px;
+  max-height: 180px;
+  overflow: auto;
+}
+
 /* Mobile: ditch the device-frame padding so phone users get every
  * available pixel for the preview itself. */
 @media (max-width: 600px) {
@@ -947,6 +1035,114 @@ button { font-family: inherit; color: inherit; }
   font-family: inherit;
 }
 
+/* Editable file: textarea filling the viewer body area. Cmd+S saves
+ * to /api/files/write. Dirty + saved indicators in the head. No
+ * syntax highlight in v1 — keeps the textarea fast and avoids the
+ * complexity of running a real CodeMirror instance. */
+.files-edit {
+  flex: 1 1 auto;
+  width: 100%;
+  background: hsl(var(--_gray-850, 0 0% 8%));
+  color: hsl(var(--text-000));
+  border: 0;
+  outline: none;
+  padding: 12px 14px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  line-height: 1.55;
+  resize: none;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+  caret-color: var(--accent, #a78bfa);
+}
+.files-edit:focus {
+  outline: none;
+}
+@media (max-width: 720px) {
+  .files-edit { font-size: 13px; line-height: 1.6; }
+}
+.files-viewer-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.08));
+  background: hsl(var(--_gray-900, 0 0% 4%));
+  flex: 0 0 auto;
+}
+.files-viewer-name {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  color: var(--text, #f4f1ea);
+}
+.files-dirty {
+  font-size: 11px;
+  color: #f59e0b;
+  margin-left: auto;
+}
+.files-saved {
+  font-size: 11px;
+  color: #22c55e;
+  margin-left: auto;
+}
+.files-dirty[hidden], .files-saved[hidden] { display: none !important; }
+.files-save-btn {
+  background: var(--accent, #a78bfa);
+  color: hsl(var(--_gray-900, 0 0% 4%));
+  border: 0;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.files-save-btn:disabled {
+  opacity: .35;
+  cursor: not-allowed;
+}
+.files-save-btn:not(:disabled):hover { opacity: .92; }
+/* Force viewer body to flex column so head + textarea stack and the
+ * textarea fills remaining height. */
+.files-viewer {
+  display: flex;
+  flex-direction: column;
+}
+/* Override Prism's theme background to match Veronum's page bg
+ * exactly — the same hsl(var(--_gray-850)) used by <body> and the
+ * chat surface. Avoids the "light/grey panel embedded in a dark UI"
+ * look. !important is needed because Prism's theme CSS (loaded from
+ * CDN, can't be edited) declares the bg with the same specificity.
+ * Containers around the code (.files-viewer-body, .files-viewer) are
+ * also forced to the same color so there's no seam. */
+.files-viewer,
+.files-viewer-body {
+  background: hsl(var(--_gray-850)) !important;
+}
+.files-viewer-body pre[class*="language-"],
+.files-viewer-body code[class*="language-"] {
+  background: hsl(var(--_gray-850)) !important;
+  color: hsl(var(--text-000)) !important;
+  text-shadow: none !important;
+}
+
+/* Mobile-only code viewer tweaks: a little more breathing room,
+ * slightly bigger code, and smooth horizontal scrolling for long
+ * lines (no wrap — wrapping mangles indent). */
+@media (max-width: 720px) {
+  .files-viewer-body {
+    padding: 14px 12px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .files-viewer-body pre {
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre;
+    overflow-x: auto;
+  }
+}
+
 /* Mobile: stack tree above viewer instead of side-by-side. Tree gets
  * a height cap so the viewer always has room. */
 @media (max-width: 720px) {
@@ -959,5 +1155,582 @@ button { font-family: inherit; color: inherit; }
     max-height: 38vh;
     border-right: 0;
     border-bottom: 1px solid var(--border, rgba(255,255,255,.08));
+  }
+}
+
+/* ─── Activity tab (recent edits feed) ────────────────────────────
+ * Each row is a clickable summary that expands to show the full
+ * red/green diff inline. A small text input lets the user name the
+ * change (saved per cwd to .veronum/edits.json). */
+.preview-body[data-tab="activity"] {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+.activity-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.08));
+  background: hsl(var(--_gray-900, 0 0% 4%));
+  flex: 0 0 auto;
+}
+.activity-list {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 6px 0;
+}
+.activity-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  color: var(--text, #f4f1ea);
+  border: 1px solid var(--border, rgba(255,255,255,.12));
+  padding: 4px 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.activity-action:hover:not(:disabled) { background: rgba(255,255,255,.05); }
+.activity-action:disabled { opacity: .35; cursor: not-allowed; }
+.activity-source[data-source="undo"]    { background: rgba(245, 158, 11, .18); color: #fcd34d; }
+.activity-source[data-source="redo"]    { background: rgba(56, 189, 248, .18); color: #7dd3fc; }
+.activity-empty {
+  padding: 40px 24px;
+  text-align: center;
+  color: hsl(var(--text-200, 0 0% 50%));
+  font-size: 13px;
+}
+.activity-entry {
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.06));
+  padding: 10px 14px;
+}
+.activity-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+.activity-entry-head:hover { color: var(--text, #f4f1ea); }
+.activity-source {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.06);
+  color: hsl(var(--text-100, 0 0% 70%));
+  flex: 0 0 auto;
+}
+.activity-source[data-source="claude"]  { background: rgba(212, 130, 67, .18); color: #f0a570; }
+.activity-source[data-source="cursor"]  { background: rgba(167, 139, 250, .18); color: #c4b5fd; }
+.activity-source[data-source="user"]    { background: rgba(34, 197, 94, .15); color: #86efac; }
+.activity-counts {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.activity-added { color: #4ade80; margin-right: 4px; }
+.activity-removed { color: #f87171; }
+.activity-path {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: hsl(var(--text-100, 0 0% 70%));
+}
+.activity-time {
+  flex: 0 0 auto;
+  color: hsl(var(--text-200, 0 0% 50%));
+  font-size: 11px;
+}
+.activity-entry-body {
+  margin-top: 10px;
+  display: none;
+}
+.activity-entry.open .activity-entry-body { display: block; }
+.activity-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.activity-name-row input {
+  flex: 1 1 auto;
+  background: hsl(var(--_gray-900, 0 0% 4%));
+  border: 1px solid var(--border, rgba(255,255,255,.10));
+  color: var(--text, #f4f1ea);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.activity-name-row input:focus { outline: 1px solid var(--accent, #a78bfa); }
+.activity-name-save {
+  background: var(--accent, #a78bfa);
+  color: hsl(var(--_gray-900, 0 0% 4%));
+  border: 0;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+/* Diff block — monospace, line-by-line. + lines green tint, - lines
+ * red tint. We render as a <pre> with one .diff-line per line. */
+.activity-diff {
+  background: hsl(var(--_gray-900, 0 0% 4%));
+  border: 1px solid var(--border, rgba(255,255,255,.08));
+  border-radius: 6px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
+  padding: 8px 0;
+  overflow: auto;
+  max-height: 480px;
+}
+.diff-line {
+  padding: 0 12px;
+  white-space: pre;
+}
+.diff-line.add { background: rgba(34,197,94,.10); color: #c2f0d2; }
+.diff-line.add::before { content: "+ "; color: #4ade80; }
+.diff-line.del { background: rgba(248,113,113,.10); color: #f5c7c7; text-decoration: line-through; text-decoration-color: rgba(248,113,113,.3); }
+.diff-line.del::before { content: "- "; color: #f87171; }
+.diff-line.ctx { color: hsl(var(--text-200, 0 0% 50%)); }
+.diff-line.ctx::before { content: "  "; }
+
+/* ─── VS Code mode ────────────────────────────────────────────────
+ * No chat — the workspace panel IS the main view. Hide messages /
+ * composer / voice scaffolding when body[data-mode="vscode"]. The
+ * preview panel itself is already full-screen on mobile and pinned
+ * alongside the drawer on desktop, so no layout change needed there. */
+body[data-mode="vscode"] .messages,
+body[data-mode="vscode"] #voice-bar,
+body[data-mode="vscode"] #voice-status,
+body[data-mode="vscode"] #composer {
+  display: none !important;
+}
+/* In vscode mode, force the preview panel to stay open even if the
+ * user taps its close button — close button instead pops them back
+ * to the project list (handled in app.js). Visually keep it as full
+ * main area. */
+body[data-mode="vscode"] .preview-panel { display: flex !important; }
+
+/* ─── Terminal tab ─────────────────────────────────────────────────
+ * Top strip is a row of tab pills (one per open terminal) + a "+"
+ * button to spawn a new one. Below the strip is the xterm stage which
+ * fills remaining height. Each xterm canvas is mounted in a child div
+ * (.term-instance) and swapped in/out by hiding siblings — keeps the
+ * pty connections alive across tab switches. */
+.term-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.08));
+  background: hsl(var(--_gray-900, 0 0% 4%));
+  overflow-x: auto;
+  flex: 0 0 auto;
+}
+.term-tab-strip {
+  display: flex;
+  gap: 4px;
+  flex: 1 1 auto;
+  overflow-x: auto;
+}
+.term-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  color: hsl(var(--text-100, 0 0% 70%));
+  border: 1px solid transparent;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.term-tab:hover { background: rgba(255,255,255,.05); }
+.term-tab.active {
+  background: hsl(var(--_gray-850, 0 0% 8%));
+  border-color: var(--border, rgba(255,255,255,.10));
+  color: var(--text, #f4f1ea);
+}
+.term-tab-close {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  opacity: .55;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+}
+.term-tab-close:hover { opacity: 1; }
+.term-add-btn {
+  flex: 0 0 auto;
+  background: transparent;
+  color: var(--text, #f4f1ea);
+  border: 1px solid var(--border, rgba(255,255,255,.10));
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.term-add-btn:hover { background: rgba(255,255,255,.06); }
+
+.term-stage {
+  flex: 1 1 auto;
+  position: relative;
+  background: hsl(var(--_gray-850, 0 0% 8%));
+  overflow: hidden;
+  min-height: 0;
+}
+.term-instance {
+  position: absolute;
+  inset: 0;
+  padding: 8px;
+}
+.term-instance[hidden] { display: none !important; }
+.term-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: hsl(var(--text-200, 0 0% 50%));
+  font-size: 13px;
+  text-align: center;
+  padding: 24px;
+}
+.term-empty[hidden] { display: none !important; }
+/* xterm.js viewport — let it fill the .term-instance container. */
+.term-instance .xterm,
+.term-instance .xterm-viewport,
+.term-instance .xterm-screen {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* The terminal body inherits the same flex layout the other tabs use
+ * but needs to be column-oriented (head on top, stage below). */
+.preview-body[data-tab="terminal"] {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+
+/* ─── Version modal (save/revert via git) ─────────────────────────
+ * Re-uses the .billing-modal / .billing-sheet skeleton for layout
+ * (bottom sheet on mobile, centered on desktop). Adds a top "Save"
+ * row + a scrolling list of past versions, each with a Revert button. */
+.version-save-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.version-save-row input {
+  flex: 1 1 auto;
+  background: hsl(var(--_gray-900, 0 0% 4%));
+  color: var(--text, #f4f1ea);
+  border: 1px solid var(--border, rgba(255,255,255,.10));
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: inherit;
+}
+.version-save-row input:focus { outline: 1px solid var(--accent, #a78bfa); }
+#version-save-btn {
+  background: var(--accent, #a78bfa);
+  color: hsl(var(--_gray-900, 0 0% 4%));
+  border: 0;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+#version-save-btn:disabled { opacity: .55; cursor: progress; }
+.version-remote {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  background: hsl(var(--_gray-900, 0 0% 4%));
+  border: 1px solid var(--border, rgba(255,255,255,.08));
+  border-radius: 8px;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+.version-remote-url {
+  flex: 1 1 auto;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: hsl(var(--text-100, 0 0% 70%));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.version-remote-status[data-state="ok"]   { color: #4ade80; }
+.version-remote-status[data-state="err"]  { color: #f87171; }
+.version-create-row {
+  display: flex;
+  gap: 6px;
+}
+.version-create-row input {
+  flex: 1 1 auto;
+  background: hsl(var(--_gray-900, 0 0% 4%));
+  color: var(--text, #f4f1ea);
+  border: 1px solid var(--border, rgba(255,255,255,.10));
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.version-create-btn {
+  background: var(--accent, #a78bfa);
+  color: hsl(var(--_gray-900, 0 0% 4%));
+  border: 0;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-weight: 500;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.version-create-btn:disabled { opacity: .55; cursor: progress; }
+.version-divider {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: hsl(var(--text-200, 0 0% 50%));
+  margin: 18px 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.08));
+}
+.version-list {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.version-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 6px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.04));
+}
+.version-row:last-child { border-bottom: 0; }
+.version-info { flex: 1 1 auto; overflow: hidden; }
+.version-msg {
+  font-size: 13px;
+  color: var(--text, #f4f1ea);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.version-meta {
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: hsl(var(--text-200, 0 0% 50%));
+  margin-top: 2px;
+}
+.version-revert {
+  background: transparent;
+  color: var(--text, #f4f1ea);
+  border: 1px solid var(--border, rgba(255,255,255,.15));
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  flex: 0 0 auto;
+}
+.version-revert:hover { background: rgba(255,255,255,.05); }
+.version-row.current .version-msg::after {
+  content: " · current";
+  color: #4ade80;
+  font-weight: 500;
+}
+.version-row.current .version-revert { display: none; }
+
+/* ─── Billing modal + paywall ─────────────────────────────────────
+ * Mobile: bottom sheet that slides up from the bottom, rounded top
+ * corners, ~70vh max height with internal scroll. Tap-outside to close.
+ * Desktop: centered modal capped at 480px wide, ~90vh max height.
+ * Both share a blurred backdrop so the chat stays barely-visible behind
+ * (gives spatial context — user isn't "navigated away" from the chat). */
+.billing-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.billing-modal[hidden] { display: none !important; }
+.billing-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, .55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.billing-sheet {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+  max-height: 86vh;
+  background: var(--bg, #0e0d12);
+  color: var(--text, #f4f1ea);
+  border: 1px solid var(--border, rgba(255,255,255,.10));
+  border-bottom: 0;
+  border-radius: 18px 18px 0 0;
+  padding: 28px 22px calc(22px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+  box-shadow: 0 -8px 40px rgba(0, 0, 0, .5);
+}
+.billing-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: transparent;
+  border: 0;
+  color: var(--text, #f4f1ea);
+  opacity: .6;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 8px;
+}
+.billing-close:hover { opacity: 1; background: rgba(255,255,255,.06); }
+.billing-title {
+  margin: 0 0 18px;
+  font-size: 22px;
+  font-weight: 500;
+}
+.billing-state { margin-bottom: 22px; }
+.billing-tier {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text, #f4f1ea);
+  margin-bottom: 10px;
+}
+.billing-meter { font-size: 12px; color: var(--text-dim, #999); }
+.billing-bar {
+  height: 8px;
+  background: rgba(255,255,255,.07);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.billing-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent, #a78bfa);
+  transition: width 200ms ease;
+}
+.billing-fill[data-state="warn"]   { background: #f59e0b; }
+.billing-fill[data-state="over"]   { background: #ef4444; }
+.billing-amounts { font-family: var(--font-mono, ui-monospace, monospace); }
+
+.billing-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.billing-cta {
+  display: block;
+  width: 100%;
+  padding: 13px 18px;
+  border-radius: 12px;
+  border: 0;
+  font-size: 15px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: center;
+  transition: opacity 150ms, transform 60ms;
+}
+.billing-cta:active { transform: scale(0.985); }
+.billing-cta:hover { opacity: .92; }
+.billing-cta[hidden] { display: none !important; }
+.billing-primary {
+  background: var(--accent, #a78bfa);
+  color: var(--bg, #0e0d12);
+}
+.billing-secondary {
+  background: rgba(255,255,255,.06);
+  color: var(--text, #f4f1ea);
+  border: 1px solid var(--border, rgba(255,255,255,.10));
+}
+.billing-tertiary {
+  background: transparent;
+  color: var(--text-dim, #999);
+  border: 1px dashed var(--border, rgba(255,255,255,.12));
+}
+.billing-note {
+  font-size: 11.5px;
+  color: var(--text-dim, #999);
+  margin: 0;
+  line-height: 1.5;
+}
+.billing-error {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: rgba(239,68,68,.12);
+  border: 1px solid rgba(239,68,68,.35);
+  border-radius: 8px;
+  font-size: 12px;
+  color: #fda4af;
+}
+.billing-error[hidden] { display: none !important; }
+
+/* Over-quota lockout banner above the composer. */
+.billing-paywall {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 12px;
+  padding: 11px 14px;
+  background: rgba(239,68,68,.10);
+  border: 1px solid rgba(239,68,68,.30);
+  border-radius: 12px;
+  font-size: 13px;
+  color: var(--text, #f4f1ea);
+}
+.billing-paywall[hidden] { display: none !important; }
+.billing-paywall-cta {
+  flex: 0 0 auto;
+  background: var(--accent, #a78bfa);
+  color: var(--bg, #0e0d12);
+  border: 0;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-weight: 500;
+  cursor: pointer;
+  font-size: 13px;
+}
+.billing-paywall-cta:hover { opacity: .92; }
+
+/* Desktop: center the modal, smaller backdrop, rounded all corners. */
+@media (min-width: 720px) {
+  .billing-modal { align-items: center; }
+  .billing-sheet {
+    border-radius: 18px;
+    border-bottom: 1px solid var(--border, rgba(255,255,255,.10));
+    max-height: 80vh;
   }
 }

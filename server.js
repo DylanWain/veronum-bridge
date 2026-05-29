@@ -23,6 +23,7 @@ const { spawn, execSync } = require("node:child_process");
 const jsonlCache = require("./lib/jsonlCache");
 const claudeReader = require("./lib/claudeReader");
 const cursorReader = require("./lib/cursor");
+const vscodeReader = require("./lib/vscode");
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
@@ -42,6 +43,18 @@ app.use((req, _res, next) => {
 const { mountProjectFiles } = require("./lib/projectFiles");
 mountProjectFiles(app);
 
+// Recent-edits feed: scans the active session's JSONL for AI Edit/
+// Write/MultiEdit tool calls + merges in-app editor saves. Powers
+// the Activity tab in the workspace panel.
+const { mountActivity } = require("./lib/activity");
+mountActivity(app);
+
+// Save / revert versions via git. Save = git commit, revert = restore
+// a previous commit's tree and record it as its own commit so history
+// is never lost. See lib/git.js.
+const { mountGit } = require("./lib/git");
+mountGit(app);
+
 // Pixel-streaming live preview. Spawns headless Chrome via CDP and
 // pipes JPEG frames over a WebSocket to whatever client (phone, desktop)
 // is connected. Replaces the path-rewriting HTTP proxy approach, which
@@ -49,20 +62,38 @@ mountProjectFiles(app);
 // See lib/livePreview.js. WS upgrade is attached below after listen().
 const { mountLivePreview } = require("./lib/livePreview");
 
-// Port-discovery endpoint stays — it's useful for the picker UI even
-// though we no longer proxy through /preview/:port. We just need the
-// list of listening ports so the user can pick which one to screencast.
-const { discoverPorts } = require("./lib/previewProxy");
-app.get("/api/preview/ports", async (_req, res) => {
-  try {
-    const ports = await discoverPorts();
-    res.json({ ok: true, ports });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
+// Project dev-server lifecycle (POST /api/preview/dev-start, etc).
+// Reads the session's cwd/package.json, runs `npm run dev`, parses the
+// announced URL from stdout, hands it back to the UI so the live
+// preview can immediately point at the user's actual app — rather
+// than whatever random localhost port happened to be listening.
+const { mountDevServer } = require("./lib/projectDevServer");
+mountDevServer(app);
+
+// Session URL scan — reads the active Claude/Cursor session's JSONL
+// and pulls the most recent live localhost URL out of whatever it
+// printed (assistant text, Bash tool_result, etc.). Lets the preview
+// panel jump straight to the URL Cursor/Claude already announced
+// instead of probing ports.
+const { mountSessionUrl } = require("./lib/sessionUrlScan");
+mountSessionUrl(app);
+
+// Re-mount the /preview/:port/* HTTP proxy so phones (which can't reach
+// the Mac's localhost) can view dev servers through Veronum's
+// cloudflared tunnel. mountPreviewProxy injects <base href> into HTML
+// responses so relative URLs resolve correctly. WS upgrades for HMR
+// are attached to the httpServer below after app.listen().
+const { mountPreviewProxy } = require("./lib/previewProxy");
+// mountPreviewProxy registers BOTH /preview/:port/* (proxy) and
+// /api/preview/ports (port discovery), and attaches a WS upgrade
+// handler later when we pass it httpServer.
 
 app.use(express.static(path.join(__dirname, "public")));
+
+// Serve xterm + xterm-addon-fit from node_modules so the terminal UI
+// works without a CDN dependency (CDN load was failing for some users).
+app.use("/vendor/xterm", express.static(path.join(__dirname, "node_modules/@xterm/xterm")));
+app.use("/vendor/xterm-fit", express.static(path.join(__dirname, "node_modules/@xterm/addon-fit")));
 
 // ─── PROJECT + SESSION LISTING ─────────────────────────────────────
 
@@ -72,8 +103,9 @@ app.get("/api/projects", async (_req, res) => {
       claudeReader.listClaudeProjects(),
       Promise.resolve(cursorReader.listProjects ? cursorReader.listProjects() : []),
     ]);
-    // Normalize both into { cwd, label, sessionCount } so the client
-    // doesn't care which editor a project belongs to.
+    const vscodeRaw = vscodeReader.listProjects();
+    // Normalize all three into { cwd, label, sessionCount } so the
+    // client doesn't care which editor a project belongs to.
     const claude = claudeRaw.map((p) => ({
       cwd: p.cwd, label: p.label || p.cwd.split("/").pop() || p.cwd,
       sessionCount: p.sessionCount || 0,
@@ -83,7 +115,12 @@ app.get("/api/projects", async (_req, res) => {
       label: p.name || (p.fullPath || "").split("/").pop() || "(cursor)",
       sessionCount: 0, // cursor.js doesn't give session count via listProjects
     }));
-    res.json({ ok: true, claude, cursor });
+    const vscode = vscodeRaw.map((p) => ({
+      cwd: p.fullPath || p.id || "",
+      label: p.name || (p.fullPath || "").split("/").pop() || "(vscode)",
+      sessionCount: 0, // VS Code has no Veronum session concept — just open the folder
+    }));
+    res.json({ ok: true, claude, cursor, vscode });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -564,7 +601,17 @@ app.post("/api/cursor/send", async (req, res) => {
   args.push(prompt);
   console.log(`[cursor-dispatch] spawning ${cursorBin} ${args.slice(0,-1).join(" ")} <prompt ${prompt.length}ch>`);
 
-  const child = spawn(cursorBin, args, { cwd, env: process.env });
+  // stdio[0] = "ignore" so cursor-agent gets EOF on stdin immediately.
+  // Without this the CLI sits forever waiting for piped input, even with
+  // --print + a prompt arg, and emits nothing — which is exactly the
+  // "dispatch didn't reach Cursor" symptom we were seeing.
+  // Also pass --trust so it doesn't block on the workspace-trust prompt.
+  if (!args.includes("--trust")) args.unshift("--trust");
+  const child = spawn(cursorBin, args, {
+    cwd,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 
   let accumulated = "";
   child.stdout.on("data", (chunk) => {
@@ -665,16 +712,24 @@ function companionInstructions() {
   // Static-ish system prompt for the Companion. Kept short because
   // Realtime sessions are sensitive to long instructions (latency).
   return [
-    "You are a calm, concise voice assistant alongside the user's Claude Code (or Cursor) coding session.",
-    "RULES:",
-    "1. Do NOT greet yourself or say your name. Stay silent on connect.",
-    "2. Keep spoken replies short — 1-2 sentences unless asked for detail.",
-    "3. You receive live system updates describing what Claude is doing (tool calls, file edits, replies). Use them to answer 'what's happening' questions, but do not narrate proactively — only when asked or explicitly told to summarize.",
-    "4. When the user asks you to relay something to Claude ('tell Claude to…', 'ask Claude to…'), call the submit_to_claude tool with their request as the prompt.",
-    "5. When the user asks for a summary of Claude's last reply, call summarize_claude_response.",
-    "6. When asked about session history (first message, message count, etc.), call query_session_history.",
-    "7. When asked to research something or look something up, call web_search.",
-    "8. If you receive a system message saying 'CLAUDE_FINISHED: <text>', wait until you are not currently speaking, then give a 1-2 sentence summary of what Claude did. Do not interrupt yourself.",
+    "You are a hands-free voice dispatcher for the user's Claude Code (or Cursor) coding session. The user's hands are busy. Your job is to FORWARD what they say to their coding agent.",
+    "",
+    "DEFAULT BEHAVIOR — for ANYTHING the user says, treat it as a prompt to forward:",
+    "  1. SPEAK FIRST: say out loud what you're about to send, in the form: 'Sending to Claude: <the prompt>.' (or 'Sending to Cursor: ...' if the session is Cursor). Use the user's own words — do NOT translate, do NOT paraphrase beyond minor grammar cleanup, do NOT add anything.",
+    "  2. THEN call submit_to_claude with that same prompt text.",
+    "",
+    "The user MUST hear what you're sending before the tool call, every time. This is non-negotiable. If you call submit_to_claude without speaking the 'Sending to Claude: ...' announcement first, you have failed.",
+    "",
+    "ONLY skip submit_to_claude when the user EXPLICITLY invokes one of these by name:",
+    "  - 'summarize Claude's reply' / 'read me the last reply' → call summarize_claude_response",
+    "  - 'what was my first message' / 'my last message' / 'how many messages' / 'find <X> in my history' → call query_session_history with the matching action",
+    "  - 'search the web for <X>' / 'google <X>' → call web_search",
+    "Everything else — questions, requests, ideas, complaints, observations, 'can you' / 'please' / 'I want' — goes to submit_to_claude. Never treat a project question as a history query.",
+    "",
+    "OTHER RULES:",
+    "- Do NOT greet yourself or say your name. Stay silent on connect.",
+    "- After dispatching, stay quiet until the user speaks again or you receive a 'CLAUDE_FINISHED: <text>' system message — then give a 1-2 sentence summary.",
+    "- Never echo the user's words back as a question. If you didn't catch what they said, say 'sorry, again?' — don't paraphrase to confirm.",
   ].join("\n");
 }
 
@@ -717,8 +772,9 @@ const COMPANION_TOOLS = [
       properties: {
         action: {
           type: "string",
-          enum: ["first", "count", "nth", "list", "grep"],
-          description: "Which query to run.",
+          enum: ["first", "last", "count", "nth", "list", "grep"],
+          description:
+            "Which query to run. Use 'first' for the opening message, 'last' for the most recent user message, 'nth' with n for a specific index, 'count' for the total, 'list' to enumerate, 'grep' to search by regex.",
         },
         n: {
           type: "integer",
@@ -798,7 +854,12 @@ app.get("/api/voice/realtime-token", async (_req, res) => {
                 prefix_padding_ms: 300,
                 silence_duration_ms: 600,
               },
-              transcription: { model: "whisper-1" },
+              // Pin Whisper to English — auto-detect was mis-routing short
+            // utterances as Chinese/other and the model would then forward
+            // the *translated* prompt to Claude. The user is an English
+            // speaker; if non-English support is ever needed, expose a
+            // setting rather than relying on detection.
+            transcription: { model: "whisper-1", language: "en" },
             },
             output: {
               voice: REALTIME_VOICE,
@@ -951,7 +1012,14 @@ app.post("/api/voice/session-history", async (req, res) => {
     if (!located) {
       return res.status(404).json({ ok: false, error: "session jsonl not found" });
     }
-    const args = [action || "first"];
+    const ALLOWED = new Set(["first", "last", "nth", "count", "list", "grep"]);
+    if (!ALLOWED.has(action)) {
+      return res.status(400).json({
+        ok: false,
+        error: `unknown action ${JSON.stringify(action)}; allowed: ${[...ALLOWED].join(", ")}`,
+      });
+    }
+    const args = [action];
     if (action === "nth") args.push(String(n || 1));
     if (action === "grep") args.push(pattern || ".");
     if (action === "list" && n) args.push(String(n));
@@ -985,6 +1053,12 @@ const bridgeSupabase =
 // charge); silently allows when daemon is unpaired (reason='unpaired').
 const billingGate =
   process.env.LOCAL_ONLY === "1" ? null : require("./lib/billingGate");
+// In-app billing UI endpoints: GET /api/billing/state + /api/billing/links.
+// Powers the "Plan" topbar button + the over-quota paywall. Mounted in
+// every mode (including LOCAL_ONLY) so the UI doesn't have to branch;
+// LOCAL_ONLY just gets a synthesized "no-billing" snapshot.
+const { mountBilling } = require("./lib/billing");
+mountBilling(app);
 // cloudflared lifecycle — spawned alongside bridgeSupabase so the paired
 // browser session can reach this Mac from any device. URL changes flow
 // to bridgeSupabase.setTunnelUrl which publishes to Supabase via the
@@ -1286,3 +1360,13 @@ const httpServer = app.listen(PORT, () => {
 // Mount live-preview WebSocket upgrade handler. Must happen AFTER
 // app.listen() so we have the http.Server handle for binding 'upgrade'.
 mountLivePreview(app, httpServer);
+// Tunnel-friendly preview proxy: /preview/<port>/* → http://localhost:<port>/*
+// with HTML <base href> rewriting. Lets phones over cloudflared open
+// the same URL as the Mac browser does for localhost. WS upgrades for
+// HMR are bound onto httpServer here.
+mountPreviewProxy(app, httpServer);
+// In-browser terminal: WS upgrade at /api/terminal/stream spawns a
+// real zsh via node-pty rooted at the session's cwd. xterm.js on the
+// client handles rendering. Multiple terminals = multiple WS connects.
+const { mountTerminal } = require("./lib/terminal");
+mountTerminal(app, httpServer);

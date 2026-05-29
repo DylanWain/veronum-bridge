@@ -13,6 +13,7 @@ const els = {
   status: document.getElementById("status"),
   claudeList: document.querySelector("#claude-projects ul"),
   cursorList: document.querySelector("#cursor-projects ul"),
+  vscodeList: document.querySelector("#vscode-projects ul"),
   projectLabel: document.getElementById("project-label"),
   sessionsList: document.querySelector("#sessions ul"),
   chatTitle: document.getElementById("chat-title"),
@@ -201,7 +202,8 @@ async function loadProjects() {
     if (!r.ok) throw new Error(r.error || "load failed");
     renderProjects("claude", r.claude || [], els.claudeList);
     renderProjects("cursor", r.cursor || [], els.cursorList);
-    setStatus(`${r.claude?.length || 0} claude · ${r.cursor?.length || 0} cursor`, "ok");
+    renderProjects("vscode", r.vscode || [], els.vscodeList);
+    setStatus(`${r.claude?.length || 0} claude · ${r.cursor?.length || 0} cursor · ${r.vscode?.length || 0} vscode`, "ok");
   } catch (e) {
     setStatus("error: " + e.message, "err");
   }
@@ -232,6 +234,16 @@ async function pickProject(editor, project) {
     .querySelector(`#${editor}-projects li[data-cwd="${cssEscape(project.cwd)}"]`)
     ?.classList.add("active");
 
+  // VS Code mode: no chat, no sessions — go straight into the
+  // Files/Preview/Terminal workspace panel rooted at the project's cwd.
+  if (editor === "vscode") {
+    enterVscodeMode(project);
+    return;
+  }
+  // Leaving VS Code mode (or never entered it): make sure chat chrome
+  // is visible again.
+  document.body.removeAttribute("data-mode");
+
   els.projectLabel.textContent = "in " + (project.label || project.cwd);
   els.sessionsList.innerHTML = `<li class="dim">loading…</li>`;
   els.chatTitle.textContent = "Pick a session";
@@ -258,6 +270,33 @@ async function pickProject(editor, project) {
   } catch (e) {
     els.sessionsList.innerHTML = `<li class="dim">error: ${escapeHtml(e.message)}</li>`;
   }
+}
+
+// VS Code mode — no chat. Just opens the Files/Preview/Terminal panel
+// rooted at the project's cwd. The chat composer + messages list are
+// hidden so the workspace panel is effectively the whole window.
+function enterVscodeMode(project) {
+  // Synthetic session id keeps any code that reads state.sessionId happy
+  // (file tree, preview, terminal all use cwd + may use sessionId for
+  // the project-cwd session-scan fallback).
+  state.sessionId = `vscode:${project.cwd}`;
+  els.chatTitle.textContent = project.label || (project.cwd || "").split("/").pop();
+  document.getElementById("status").textContent = "vscode · " + short(project.cwd);
+  els.composer.hidden = true;
+  els.messages.innerHTML = "";
+  // Force the workspace panel open and switch to Files tab so the user
+  // lands in the file tree immediately. Mark the body so CSS can hide
+  // chat chrome (status bar etc) in vscode mode.
+  document.body.dataset.mode = "vscode";
+  const panel = document.getElementById("preview-panel");
+  if (panel) panel.hidden = false;
+  // Close the drawer (mobile) and hand back the file list.
+  const drawer = document.getElementById("drawer");
+  if (drawer) drawer.dataset.open = "false";
+  const backdrop = document.getElementById("drawer-backdrop");
+  if (backdrop) backdrop.hidden = true;
+  // Re-load the file tree for the new cwd.
+  document.dispatchEvent(new CustomEvent("veronum:session-changed", { detail: { project } }));
 }
 
 function renderSessions(editor, sessions) {
@@ -362,7 +401,7 @@ els.composer.addEventListener("submit", async (e) => {
   // Visible loading status INSIDE the assistant bubble so user sees
   // progress, not silence. The bodyEl gets replaced by real text on
   // the first delta.
-  bodyEl.innerHTML = `<span class="loading">⏳ Starting Claude…</span>`;
+  bodyEl.innerHTML = `<span class="loading">⏳ Starting ${state.editor === "cursor" ? "Cursor" : "Claude"}…</span>`;
   els.messages.scrollTop = els.messages.scrollHeight;
 
   try {
@@ -375,6 +414,9 @@ els.composer.addEventListener("submit", async (e) => {
     bodyEl.innerHTML = `<span class="error-msg">⚠ ${escapeHtml(err.message)}</span>`;
     els.dispatchStatus.textContent = "error";
     setStatus("error: " + err.message, "err");
+    if (err.status === 402 && window.veronumBilling) {
+      window.veronumBilling.triggerPaywall(err.message);
+    }
   } finally {
     state.dispatching = false;
     els.sendBtn.disabled = false;
@@ -634,7 +676,15 @@ async function enableVoiceMode() {
   setMicClass("connecting");
   setVoiceStatus("starting voice mode…");
   try {
-    const tok = await fetch("/api/voice/realtime-token").then((r) => r.json());
+    const tokRes = await fetch("/api/voice/realtime-token");
+    if (tokRes.status === 402) {
+      const body = await tokRes.json().catch(() => ({}));
+      if (window.veronumBilling) {
+        window.veronumBilling.triggerPaywall(body.message || "Subscribe to use voice.");
+      }
+      throw new Error(body.message || "voice quota exceeded — subscribe to continue");
+    }
+    const tok = await tokRes.json();
     if (!tok.ok || !tok.clientSecret) {
       throw new Error(tok.error || tok.detail || "no client_secret");
     }
@@ -868,6 +918,9 @@ async function dispatchFromVoice(text) {
     streamEl.classList.remove("streaming");
     bodyEl.innerHTML = `<span class="error-msg">⚠ ${escapeHtml(err.message)}</span>`;
     els.dispatchStatus.textContent = "error";
+    if (err.status === 402 && window.veronumBilling) {
+      window.veronumBilling.triggerPaywall(err.message);
+    }
   } finally {
     state.dispatching = false;
   }
@@ -1004,6 +1057,12 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
     // Preview tab (canvas-based pixel stream; iframe is gone)
     portSelect: document.getElementById("preview-port"),
     previewEmpty: document.getElementById("preview-empty"),
+    previewEmptyTitle: document.getElementById("preview-empty-title"),
+    previewEmptyDetail: document.getElementById("preview-empty-detail"),
+    previewStartDev: document.getElementById("preview-start-dev"),
+    previewOpenTab: document.getElementById("preview-open-tab"),
+    previewOpenRenderer: document.getElementById("preview-open-renderer"),
+    previewError: document.getElementById("preview-error"),
     vps: document.querySelectorAll(".preview-vp"),
   };
   if (!els.btn || !els.panel) return;
@@ -1011,6 +1070,12 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
   let activeTab = "files";
   let activeFilePath = null;
   let prismLoading = null;
+  // Cwd we actually preview against. Usually equals state.project.cwd
+  // (the session's literal cwd) but the server can override it when the
+  // session was opened in a non-project dir (~) and the user `cd`'d
+  // into a real project mid-session. Set by loadPorts() and read by
+  // startDevServer() + startElectronLogPoll().
+  let effectivePreviewCwd = null;
 
   // ─── Prism.js lazy load (only when the first file is opened) ─────────
   function ensurePrism() {
@@ -1113,7 +1178,17 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
     }
   }
 
+  // Tracks the in-memory state of the currently-open file so we can
+  // detect "dirty" (unsaved changes) and prevent accidental switches
+  // that would lose edits.
+  let currentFile = null; // { rel, originalContents, language }
+
   async function openFile(rel) {
+    // Confirm dropping unsaved changes if any.
+    if (currentFile && isDirty() && activeFilePath !== rel) {
+      const ok = window.confirm(`Discard unsaved changes to ${currentFile.rel}?`);
+      if (!ok) return;
+    }
     activeFilePath = rel;
     // Mark active row
     els.tree.querySelectorAll(".files-row.active").forEach((r) => r.classList.remove("active"));
@@ -1130,25 +1205,90 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
           : r.code === "E2BIG"   ? "File too large to display."
           : r.error || "Failed to read file.";
         els.viewer.innerHTML = `<div class="files-empty">${escapeHtml(msg)}</div>`;
+        currentFile = null;
         return;
       }
+      currentFile = { rel, originalContents: r.contents, language: r.language };
       const sizeKb = (r.size / 1024).toFixed(1);
       els.viewer.innerHTML = `
         <div class="files-viewer-head">
-          <span>${escapeHtml(r.filename)}</span>
+          <span class="files-viewer-name">${escapeHtml(r.filename)}</span>
           <span class="dim">${escapeHtml(r.language)} · ${sizeKb} KB</span>
+          <span id="files-dirty" class="files-dirty" hidden>● unsaved</span>
+          <span id="files-saved" class="files-saved" hidden>✓ saved</span>
+          <button id="files-save-btn" class="files-save-btn" type="button" disabled>Save (⌘S)</button>
         </div>
-        <pre class="files-viewer-body"><code class="language-${escapeHtml(r.language)}"></code></pre>
+        <textarea id="files-edit" class="files-edit" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
       `;
-      // Insert text content via textContent (safe) then ask Prism to highlight.
-      const codeEl = els.viewer.querySelector("code");
-      codeEl.textContent = r.contents;
-      await ensurePrism();
-      if (window.Prism) window.Prism.highlightElement(codeEl);
+      const ta = els.viewer.querySelector("#files-edit");
+      const saveBtn = els.viewer.querySelector("#files-save-btn");
+      ta.value = r.contents;
+      ta.addEventListener("input", () => {
+        const dirty = isDirty();
+        els.viewer.querySelector("#files-dirty").hidden = !dirty;
+        els.viewer.querySelector("#files-saved").hidden = true;
+        if (saveBtn) saveBtn.disabled = !dirty;
+      });
+      // ⌘S / Ctrl+S to save.
+      ta.addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+          e.preventDefault();
+          saveCurrentFile();
+        }
+        // Tab indents instead of jumping focus — feels like an editor.
+        if (e.key === "Tab" && !e.shiftKey) {
+          e.preventDefault();
+          const start = ta.selectionStart, end = ta.selectionEnd;
+          ta.value = ta.value.slice(0, start) + "  " + ta.value.slice(end);
+          ta.selectionStart = ta.selectionEnd = start + 2;
+          ta.dispatchEvent(new Event("input"));
+        }
+      });
+      if (saveBtn) saveBtn.addEventListener("click", saveCurrentFile);
     } catch (e) {
       els.viewer.innerHTML = `<div class="files-empty">Error: ${escapeHtml(e.message)}</div>`;
+      currentFile = null;
     }
   }
+
+  function isDirty() {
+    const ta = els.viewer?.querySelector("#files-edit");
+    if (!ta || !currentFile) return false;
+    return ta.value !== currentFile.originalContents;
+  }
+
+  async function saveCurrentFile() {
+    const cwd = currentCwd();
+    const ta = els.viewer.querySelector("#files-edit");
+    if (!cwd || !currentFile || !ta) return;
+    const saveBtn = els.viewer.querySelector("#files-save-btn");
+    const dirtyEl = els.viewer.querySelector("#files-dirty");
+    const savedEl = els.viewer.querySelector("#files-saved");
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
+    try {
+      const res = await fetch("/api/files/write", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, rel: currentFile.rel, contents: ta.value }),
+      }).then((x) => x.json());
+      if (!res.ok) throw new Error(res.error || "save failed");
+      currentFile.originalContents = ta.value;
+      if (dirtyEl) dirtyEl.hidden = true;
+      if (savedEl) {
+        savedEl.hidden = false;
+        setTimeout(() => { if (savedEl) savedEl.hidden = true; }, 2500);
+      }
+      if (saveBtn) { saveBtn.textContent = "Save (⌘S)"; saveBtn.disabled = true; }
+    } catch (e) {
+      if (saveBtn) { saveBtn.textContent = "Save (⌘S)"; saveBtn.disabled = false; }
+      alert("Couldn't save: " + e.message);
+    }
+  }
+
+  // Warn before page unload if there are unsaved edits.
+  window.addEventListener("beforeunload", (e) => {
+    if (isDirty()) { e.preventDefault(); e.returnValue = ""; }
+  });
 
   els.tree.addEventListener("click", (e) => {
     const row = e.target.closest(".files-row");
@@ -1378,8 +1518,322 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
     });
   }
 
+  // Project-aware: when the session has a cwd, check if THAT project's
+  // dev server is running. If yes, preview it. If no, show a button to
+  // start it. Falls back to the generic port picker if there's no cwd.
+  // True when this page is being served via Veronum's cloudflared
+  // tunnel (a phone, an iPad, anything not on the Mac itself). In that
+  // case "http://localhost:4000/" is unreachable — the device has no
+  // route to the Mac's loopback — so we have to send the user through
+  // Veronum's tunnel-mounted proxy instead.
+  function isRemoteHost() {
+    const h = window.location.hostname;
+    return h && h !== "localhost" && h !== "127.0.0.1" && h !== "::1";
+  }
+
+  // Show + wire the "Preview renderer →" button for Electron projects.
+  // - If a renderer URL is already known (existing Vite/CRA dev server,
+  //   or a static server we started earlier), button opens it directly.
+  // - Otherwise the button POSTs /api/preview/renderer-start, which
+  //   spawns python3 -m http.server in the project's cwd, then opens
+  //   the resulting URL.
+  // Either way, on a remote (phone) host we route through the tunnel
+  // proxy via reachableUrl(), so the phone can actually load it.
+  function wireRendererButton({ rendererAvailable, rendererUrl, cwd }) {
+    if (!els.previewOpenRenderer) return;
+    if (!rendererAvailable) {
+      els.previewOpenRenderer.hidden = true;
+      els.previewOpenRenderer.onclick = null;
+      return;
+    }
+    els.previewOpenRenderer.hidden = false;
+    els.previewOpenRenderer.disabled = false;
+    els.previewOpenRenderer.textContent = rendererUrl
+      ? "Preview renderer →"
+      : "Preview renderer (spawn server) →";
+    els.previewOpenRenderer.onclick = async () => {
+      try {
+        els.previewOpenRenderer.disabled = true;
+        els.previewOpenRenderer.textContent = "Starting renderer…";
+        let url = rendererUrl;
+        if (!url) {
+          const r = await fetch("/api/preview/renderer-start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cwd }),
+          }).then((x) => x.json());
+          if (!r.ok) throw new Error(r.error || "renderer-start failed");
+          url = r.url;
+        }
+        const target = reachableUrl(url);
+        try { window.open(target, "_blank", "noopener,noreferrer"); }
+        catch { window.location.href = target; }
+        els.previewOpenRenderer.textContent = "Preview renderer →";
+        els.previewOpenRenderer.disabled = false;
+      } catch (e) {
+        els.previewOpenRenderer.textContent = "Preview renderer →";
+        els.previewOpenRenderer.disabled = false;
+        if (els.previewError) {
+          els.previewError.hidden = false;
+          els.previewError.textContent = "Renderer preview failed: " + e.message;
+        }
+      }
+    };
+  }
+
+  // Turn "http://localhost:4000/" into a URL the current browser can
+  // actually reach. On the Mac that's the localhost URL as-is; on the
+  // phone we route through `${origin}/preview/<port>/` which the daemon
+  // proxies to the Mac's localhost.
+  function reachableUrl(localUrl) {
+    const m = String(localUrl).match(/^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(\d{2,5})\/?(.*)$/);
+    if (!m) return localUrl;
+    const port = m[1];
+    const rest = m[2] || "";
+    if (isRemoteHost()) {
+      return `${window.location.origin}/preview/${port}/${rest}`;
+    }
+    return localUrl;
+  }
+
+  // Show the "Open in new tab" button pointing at `url`. The button
+  // hands off to the OS browser — phone/Safari, Mac/Chrome, etc — so
+  // the user gets full native interaction speed instead of a 1-fps
+  // pixel stream.
+  function showOpenInTab(url, script, cwdNote) {
+    closePreviewWs?.(); // tear down any leftover stream
+    const target = reachableUrl(url);
+    const onTunnel = target !== url;
+    const labelCwd = projectLabel(effectivePreviewCwd || currentCwd());
+    if (els.previewEmptyTitle) {
+      els.previewEmptyTitle.textContent = `${labelCwd} is running.`;
+    }
+    if (els.previewEmptyDetail) {
+      const base = onTunnel ? `${url}  (proxied via Veronum tunnel)` : url;
+      els.previewEmptyDetail.textContent = cwdNote ? `${cwdNote}  ${base}` : base;
+    }
+    if (els.previewOpenTab) {
+      els.previewOpenTab.hidden = false;
+      els.previewOpenTab.disabled = false;
+      els.previewOpenTab.textContent = `Open ${script ? script + " " : ""}in new tab →`;
+      els.previewOpenTab.onclick = () => {
+        try { window.open(target, "_blank", "noopener,noreferrer"); }
+        catch { window.location.href = target; }
+      };
+    }
+    if (els.previewStartDev) els.previewStartDev.hidden = true;
+    showPreviewEmpty();
+  }
+
+  // Electron equivalent of showOpenInTab: there's no URL to open, just
+  // a native window on the Mac. We confirm "running" state and offer a
+  // "Launch again" action that respawns the dev script — Electron's
+  // single-instance handling takes care of focusing the existing window.
+  //
+  // Important: when the script uses concurrently/wait-on/vite (common
+  // for Electron+renderer setups), the Electron window can take 20-30s
+  // to actually appear on cold start. We surface this so the user
+  // doesn't click Launch and conclude it failed after 3s.
+  function showElectronRunning(script, logTail, justStarted, cwdNote) {
+    closePreviewWs?.();
+    const proj = projectLabel(effectivePreviewCwd || currentCwd());
+    if (els.previewEmptyTitle) {
+      els.previewEmptyTitle.textContent = justStarted
+        ? `${proj} is starting…`
+        : `${proj} is running on your Mac.`;
+    }
+    if (els.previewEmptyDetail) {
+      const base = justStarted
+        ? "Electron window can take 10-30s on cold start (Vite + bundler). Watch your Dock — the app icon will appear when it's ready. We'll keep streaming the log below."
+        : "Native Electron window — no localhost URL.";
+      els.previewEmptyDetail.textContent = cwdNote ? `${cwdNote}  ${base}` : base;
+    }
+    if (els.previewOpenTab) {
+      els.previewOpenTab.hidden = false;
+      els.previewOpenTab.disabled = false;
+      els.previewOpenTab.textContent = "Launch again →";
+      els.previewOpenTab.onclick = () => startDevServer();
+    }
+    if (els.previewStartDev) els.previewStartDev.hidden = true;
+    // Live log display in the (re-styled, neutral-color) info box. The
+    // user sees what the npm/electron child is printing in real time, so
+    // they can tell whether they're waiting on Vite, on the bundler, or
+    // on a hung step.
+    if (els.previewError && logTail) {
+      els.previewError.hidden = false;
+      els.previewError.textContent = logTail;
+      els.previewError.style.background = "rgba(120, 120, 120, .08)";
+      els.previewError.style.borderColor = "rgba(180, 180, 180, .25)";
+      els.previewError.style.color = "#cbd5e1";
+      els.previewError.style.whiteSpace = "pre-wrap";
+      els.previewError.style.maxHeight = "240px";
+      els.previewError.style.overflow = "auto";
+    }
+    showPreviewEmpty();
+    // If we just kicked off the launch, poll dev-status every 2s for the
+    // next 60s so the log tail in the panel updates as Vite/Electron
+    // print progress. Stops when the user navigates away.
+    if (justStarted) {
+      startElectronLogPoll(effectivePreviewCwd || currentCwd());
+    }
+  }
+
+  // Poll dev-status to stream the live log tail into the panel until
+  // either the user switches away or 60s elapses (after which the user
+  // can hit "Launch again →" to refresh on demand).
+  let electronPollTimer = null;
+  function startElectronLogPoll(pollCwd) {
+    if (electronPollTimer) { clearInterval(electronPollTimer); electronPollTimer = null; }
+    const startedAt = Date.now();
+    // Snapshot the session id so we can tell if the user switched sessions
+    // (independent of cwd, since pollCwd may be a session-resolved project
+    // root that differs from state.project.cwd).
+    const pinnedSid = state.sessionId;
+    electronPollTimer = setInterval(async () => {
+      if (state.sessionId !== pinnedSid || activeTab !== "preview") {
+        clearInterval(electronPollTimer);
+        electronPollTimer = null;
+        return;
+      }
+      try {
+        const s = await fetch(`/api/preview/dev-status?cwd=${encodeURIComponent(pollCwd)}`).then((r) => r.json());
+        if (s.logTail && els.previewError) {
+          els.previewError.textContent = s.logTail;
+        }
+        // Flip to steady-state title when we see Vite/Electron ready signals.
+        if (els.previewEmptyTitle && /vite.*ready|app[\s_]+ready|electron[\s\S]{0,20}ready|main window/i.test(s.logTail || "")) {
+          els.previewEmptyTitle.textContent = `${projectLabel(pollCwd)} is running on your Mac.`;
+          els.previewEmptyDetail.textContent = "Native Electron window — no localhost URL.";
+        }
+        // Refresh the renderer button — as the dev script starts up
+        // it may have just announced a Vite URL we can now point the
+        // phone at without spawning a separate static server.
+        wireRendererButton({
+          rendererAvailable: s.rendererAvailable,
+          rendererUrl: s.rendererUrl,
+          cwd: pollCwd,
+        });
+      } catch { /* server might be restarting */ }
+      if (Date.now() - startedAt > 60000) {
+        clearInterval(electronPollTimer);
+        electronPollTimer = null;
+      }
+    }, 2000);
+  }
+
   async function loadPorts() {
-    els.portSelect.innerHTML = `<option value="">loading…</option>`;
+    const cwd = currentCwd();
+    // Reset error / detail / buttons before re-checking.
+    if (els.previewError) { els.previewError.hidden = true; els.previewError.textContent = ""; }
+    if (els.previewStartDev) els.previewStartDev.hidden = true;
+    if (els.previewOpenTab) {
+      els.previewOpenTab.hidden = true;
+      els.previewOpenTab.onclick = null;
+    }
+    if (els.previewOpenRenderer) {
+      els.previewOpenRenderer.hidden = true;
+      els.previewOpenRenderer.onclick = null;
+    }
+    if (els.previewEmptyDetail) els.previewEmptyDetail.textContent = "";
+
+    if (!cwd) {
+      // No session picked — empty state. Don't show arbitrary localhost
+      // apps; the preview is tied to the session you're viewing.
+      if (els.previewEmptyTitle) els.previewEmptyTitle.textContent = "Open a session to preview its project.";
+      if (els.previewEmptyDetail) els.previewEmptyDetail.textContent = "";
+      showPreviewEmpty();
+      return;
+    }
+
+    // dev-status is the project-aware path: reads THIS session's
+    // cwd/package.json (or index.html for static), tells us whether
+    // the project's own server is running and how to start it.
+    // We also pass the session source+id so the server can scan the
+    // JSONL for a `cd <project>` if the literal cwd has nothing.
+    if (els.previewEmptyTitle) els.previewEmptyTitle.textContent = "Checking project…";
+    try {
+      const params = new URLSearchParams({ cwd });
+      if (state.editor) params.set("source", state.editor);
+      if (state.sessionId) params.set("id", state.sessionId);
+      const s = await fetch(`/api/preview/dev-status?${params.toString()}`).then((r) => r.json());
+      // Server may have inferred a different project root from the session
+      // history (e.g. user opened Claude in ~ then `cd electron-landing`).
+      // From here on we operate against THAT path, not the literal cwd.
+      effectivePreviewCwd = s.resolvedFromSession || cwd;
+      const cwdNote = s.resolvedFromSession
+        ? `Found project at ${s.resolvedFromSession} (session was opened in ${projectLabel(cwd)}).`
+        : null;
+
+      if (s.running && s.kind === "electron") {
+        showElectronRunning(s.script, s.logTail, false, cwdNote);
+        wireRendererButton({
+          rendererAvailable: s.rendererAvailable,
+          rendererUrl: s.rendererUrl,
+          cwd: effectivePreviewCwd,
+        });
+        return;
+      }
+      if (s.running && s.url) {
+        showOpenInTab(s.url, s.script, cwdNote);
+        return;
+      }
+      if (s.devScriptAvailable) {
+        // We can start it — show the Start button. After start succeeds
+        // we switch to the appropriate running state.
+        const isElectron = s.kind === "electron";
+        const isStatic = s.kind === "static";
+        const labelCwd = projectLabel(effectivePreviewCwd);
+        if (els.previewEmptyTitle) {
+          els.previewEmptyTitle.textContent = isElectron
+            ? `${labelCwd} isn't running.`
+            : `${labelCwd} dev server isn't running.`;
+        }
+        if (els.previewEmptyDetail) {
+          const base = isElectron
+            ? `Click to run \`npm run ${s.script}\` — opens the Electron app on your Mac.`
+            : isStatic
+              ? `Click to serve this folder via http.server.`
+              : (s.cmd ? `Click to run \`npm run ${s.script}\` in this project.` : `Click below to start it.`);
+          els.previewEmptyDetail.textContent = cwdNote ? `${cwdNote}  ${base}` : base;
+        }
+        if (els.previewStartDev) {
+          els.previewStartDev.hidden = false;
+          els.previewStartDev.disabled = false;
+          els.previewStartDev.textContent = isElectron
+            ? "Launch app on Mac"
+            : isStatic
+              ? "Serve folder"
+              : `Start "${s.script || "dev"}" server`;
+        }
+        // For Electron, also surface the renderer-only preview option
+        // (HTML inside the window — works on phones via tunnel proxy).
+        if (isElectron) {
+          wireRendererButton({
+            rendererAvailable: s.rendererAvailable,
+            rendererUrl: s.rendererUrl,
+            cwd: effectivePreviewCwd,
+          });
+        }
+        showPreviewEmpty();
+        return;
+      }
+      // No dev script, no index.html — nothing to preview.
+      if (els.previewEmptyTitle) {
+        els.previewEmptyTitle.textContent = "Nothing to preview yet.";
+      }
+      if (els.previewEmptyDetail) {
+        els.previewEmptyDetail.textContent = `${projectLabel(cwd)} has no package.json dev script and no index.html.`;
+      }
+      showPreviewEmpty();
+    } catch (e) {
+      if (els.previewEmptyTitle) els.previewEmptyTitle.textContent = "Couldn't check dev server.";
+      if (els.previewEmptyDetail) els.previewEmptyDetail.textContent = e.message;
+      showPreviewEmpty();
+    }
+  }
+
+  async function loadGenericPorts() {
+    els.portSelect.innerHTML = `<option value="">scanning…</option>`;
     try {
       const r = await fetch("/api/preview/ports").then((x) => x.json());
       const ports = (r?.ports || []).slice().sort(
@@ -1390,28 +1844,71 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
         showPreviewEmpty();
         return;
       }
-      // Remember the previously-selected port (if any) so a Files-tab
-      // detour doesn't drop the connection. If no prior selection, pick
-      // the highest-priority port (Vite=5173, Next=3000, etc).
-      const priorPort = els.portSelect.value;
       els.portSelect.innerHTML = ports
         .map((p) => `<option value="${p.port}">${p.port} · ${p.command}</option>`)
         .join("");
-      const targetPort = priorPort && ports.some((p) => String(p.port) === priorPort)
-        ? priorPort
-        : String(ports[0].port);
-      els.portSelect.value = targetPort;
-      // Always (re-)open the stream after population. The browser
-      // auto-selects the first <option> when innerHTML is replaced,
-      // which made `!els.portSelect.value` falsy and our prior guard
-      // skipped the connect call — leaving the user stuck on the
-      // "connecting…" placeholder forever.
-      openPreviewStream(targetPort);
-    } catch (e) {
+      els.portSelect.value = String(ports[0].port);
+      openPreviewStream(String(ports[0].port));
+    } catch {
       els.portSelect.innerHTML = `<option value="">discovery failed</option>`;
       showPreviewEmpty();
     }
   }
+
+  function projectLabel(cwd) {
+    const parts = String(cwd).split("/").filter(Boolean);
+    return parts[parts.length - 1] || cwd;
+  }
+
+  async function startDevServer() {
+    // Use the effective cwd resolved by loadPorts() (which may be
+    // different from state.project.cwd if the user opened the session
+    // in a non-project dir and `cd`'d into a real project).
+    const cwd = effectivePreviewCwd || currentCwd();
+    if (!cwd) return;
+    if (els.previewError) { els.previewError.hidden = true; els.previewError.textContent = ""; }
+    if (els.previewStartDev) {
+      els.previewStartDev.disabled = true;
+      els.previewStartDev.textContent = "Starting…";
+    }
+    if (els.previewEmptyDetail) els.previewEmptyDetail.textContent = "Spawning child process; waiting for the URL…";
+    try {
+      const r = await fetch("/api/preview/dev-start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd }),
+      }).then((x) => x.json());
+      if (!r.ok) throw new Error(r.error || "start failed");
+      if (r.kind === "electron") {
+        // Electron has no URL — the native window pops up on the Mac
+        // when `npm run electron:dev` (or whatever) executes. Pass
+        // justStarted so the UI shows cold-start timing + polls the
+        // log for the next minute.
+        showElectronRunning(r.script, r.logTail, true);
+      } else if (r.url) {
+        showOpenInTab(r.url, r.script);
+        // Auto-open in a new tab on success — the click that started the
+        // server counts as user-gesture, so popup blockers stay happy.
+        // Route through the tunnel proxy on remote hosts.
+        try { window.open(reachableUrl(r.url), "_blank", "noopener,noreferrer"); } catch {}
+      } else {
+        throw new Error("Dev server started but never announced a URL.");
+      }
+    } catch (e) {
+      if (els.previewError) {
+        els.previewError.hidden = false;
+        els.previewError.textContent = e.message;
+      }
+      if (els.previewStartDev) {
+        els.previewStartDev.disabled = false;
+        els.previewStartDev.textContent = "Try again";
+      }
+      if (els.previewEmptyDetail) {
+        els.previewEmptyDetail.textContent = "Couldn't start the dev server.";
+      }
+    }
+  }
+  els.previewStartDev?.addEventListener("click", startDevServer);
 
   function setViewport(vp) {
     if (stageEl) stageEl.dataset.vp = vp;
@@ -1433,6 +1930,16 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
     }
   });
   els.close.addEventListener("click", () => {
+    // In VS Code mode the panel IS the main view — closing it would
+    // leave a blank screen. Pop the drawer open instead so the user
+    // can pick another project.
+    if (document.body.dataset.mode === "vscode") {
+      const drawer = document.getElementById("drawer");
+      if (drawer) drawer.dataset.open = "true";
+      const backdrop = document.getElementById("drawer-backdrop");
+      if (backdrop) backdrop.hidden = false;
+      return;
+    }
     els.panel.hidden = true;
     closePreviewWs(); // tear down the screencast stream when panel closes
   });
@@ -1448,4 +1955,909 @@ micBtn.addEventListener("touchcancel", (e) => { e.preventDefault(); pttEnd(); },
 
   setViewport("full");
   els.panel.dataset.tab = "files";
+})();
+
+// ─── Billing modal + paywall ───────────────────────────────────────────
+// Powers the always-on "Plan" button in the topbar AND the lockout
+// banner that appears above the composer when a dispatch endpoint
+// returns 402 payment_required. Exposes window.veronumBilling so the
+// existing dispatch error handlers can trigger the paywall.
+(() => {
+  const FREE_LIMIT_CENTS = 25;
+  const POLL_AFTER_PAYWALL_MS = 10_000;
+
+  const els = {
+    btn: document.getElementById("plan-btn"),
+    modal: document.getElementById("billing-modal"),
+    closeBtns: document.querySelectorAll("[data-billing-close]"),
+    actionBtns: document.querySelectorAll("[data-billing-action]"),
+    manageBtn: document.getElementById("billing-manage"),
+    error: document.getElementById("billing-error"),
+    paywall: document.getElementById("billing-paywall"),
+    paywallMsg: document.getElementById("billing-paywall-message"),
+    paywallCta: document.querySelector("#billing-paywall .billing-paywall-cta"),
+    composer: document.getElementById("composer"),
+    composerInput: document.getElementById("composer-input"),
+    sendBtn: document.getElementById("send-btn"),
+  };
+  if (!els.btn || !els.modal) return;
+
+  let cachedState = null;
+  let pollTimer = null;
+  let composerLocked = false;
+
+  // Modal shows plan choices only — no usage / quota stats. We still
+  // FETCH state in the background because we need to know whether
+  // there's an active subscription (to swap Subscribe/PAYG buttons for
+  // a Manage button) and to auto-unlock the composer after a payment.
+  function render(state) {
+    if (!state) return;
+    const hasSub = state.has_active_subscription || state.tier === "chad" || state.tier === "payg";
+    if (els.manageBtn) els.manageBtn.hidden = !hasSub;
+    document.querySelectorAll('[data-billing-action="subscribe"], [data-billing-action="payg"]')
+      .forEach((b) => { b.hidden = hasSub; });
+  }
+
+  async function refreshState() {
+    try {
+      const s = await fetch("/api/billing/state").then((r) => r.json());
+      if (s.ok) cachedState = s;
+      render(cachedState);
+      // Auto-unlock composer if the user has paid since we last checked.
+      if (composerLocked && cachedState && !cachedState.over_quota &&
+          (cachedState.has_active_subscription || cachedState.tier === "payg" || cachedState.is_admin)) {
+        clearPaywall();
+      }
+    } catch (e) {
+      if (els.error) {
+        els.error.hidden = false;
+        els.error.textContent = "Couldn't reach billing: " + e.message;
+      }
+    }
+  }
+
+  function openModal() {
+    els.modal.hidden = false;
+    els.modal.setAttribute("aria-hidden", "false");
+    refreshState();
+  }
+  function closeModal() {
+    els.modal.hidden = true;
+    els.modal.setAttribute("aria-hidden", "true");
+  }
+
+  els.btn.addEventListener("click", openModal);
+  els.closeBtns.forEach((b) => b.addEventListener("click", closeModal));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !els.modal.hidden) closeModal();
+  });
+
+  // Each button POSTs to its respective daemon endpoint, which calls
+  // the install-id-authed billing-bridge edge function to mint a fresh
+  // Stripe URL, then opens that URL in a new tab. Asynchronous per
+  // click — no stale URLs, no Stripe API quota burned until the user
+  // actually clicks.
+  const ACTION_TO_ENDPOINT = {
+    subscribe: "/api/billing/checkout-flat",
+    payg:      "/api/billing/checkout-payg",
+    manage:    "/api/billing/portal",
+  };
+  els.actionBtns.forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const action = btn.dataset.billingAction;
+      const endpoint = ACTION_TO_ENDPOINT[action];
+      if (!endpoint) return;
+      const originalLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Opening Stripe…";
+      if (els.error) { els.error.hidden = true; els.error.textContent = ""; }
+      try {
+        const r = await fetch(endpoint, { method: "POST" }).then((x) => x.json());
+        if (!r.ok || !r.url) throw new Error(r.error || "no_url");
+        try { window.open(r.url, "_blank", "noopener,noreferrer"); }
+        catch { window.location.href = r.url; }
+        schedulePoll(); // catch the webhook-driven tier flip
+      } catch (e) {
+        if (els.error) {
+          els.error.hidden = false;
+          els.error.textContent = "Couldn't open Stripe: " + e.message;
+        }
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+      }
+    });
+  });
+
+  // ─── Paywall lockout ──────────────────────────────────────────────────
+  // We deliberately do NOT echo the server's "$0.25 used" message; user
+  // wants the banner to read as a simple call-to-action, not a meter.
+  function triggerPaywall(_serverMessage) {
+    composerLocked = true;
+    if (els.paywall) {
+      els.paywall.hidden = false;
+      if (els.paywallMsg) els.paywallMsg.textContent = "Subscribe to keep using Veronum.";
+    }
+    if (els.composerInput) {
+      els.composerInput.disabled = true;
+      els.composerInput.placeholder = "Subscribe to keep using Veronum…";
+    }
+    if (els.sendBtn) els.sendBtn.disabled = true;
+    schedulePoll();
+  }
+
+  function clearPaywall() {
+    composerLocked = false;
+    if (els.paywall) els.paywall.hidden = true;
+    if (els.composerInput) {
+      els.composerInput.disabled = false;
+      els.composerInput.placeholder = "Ask Claude…";
+    }
+    if (els.sendBtn) els.sendBtn.disabled = false;
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function schedulePoll() {
+    if (pollTimer) return;
+    pollTimer = setInterval(refreshState, POLL_AFTER_PAYWALL_MS);
+  }
+
+  if (els.paywallCta) {
+    els.paywallCta.addEventListener("click", openModal);
+  }
+
+  // Public hook for the dispatch error handlers.
+  window.veronumBilling = {
+    triggerPaywall,
+    clearPaywall,
+    openModal,
+    refresh: refreshState,
+  };
+
+  // Warm the cache at boot so the first modal open is instant.
+  refreshState();
+})();
+
+// ─── Save / revert versions (git) ─────────────────────────────────
+// Topbar save icon → modal with "Save this version" form + a list of
+// past versions, each with a Revert button. All actions hit /api/git
+// which runs real git commands in the project's cwd.
+(() => {
+  const els = {
+    btn: document.getElementById("save-btn"),
+    modal: document.getElementById("version-modal"),
+    closeBtns: document.querySelectorAll("[data-version-close]"),
+    nameInput: document.getElementById("version-name"),
+    saveBtn: document.getElementById("version-save-btn"),
+    msg: document.getElementById("version-msg"),
+    list: document.getElementById("version-list"),
+    remote: document.getElementById("version-remote"),
+  };
+  if (!els.btn || !els.modal) return;
+
+  function cwd() {
+    return (typeof state !== "undefined" && state?.project?.cwd) || null;
+  }
+  function fmtAgo(ts) {
+    if (!ts) return "";
+    const s = Math.max(0, (Date.now() - ts) / 1000);
+    if (s < 60) return Math.floor(s) + "s ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  }
+  function showMsg(text, kind) {
+    if (!els.msg) return;
+    els.msg.hidden = false;
+    els.msg.textContent = text;
+    els.msg.style.color = kind === "error" ? "#fda4af" : kind === "ok" ? "#86efac" : "";
+  }
+  function clearMsg() { if (els.msg) { els.msg.hidden = true; els.msg.textContent = ""; } }
+
+  function open() {
+    els.modal.hidden = false;
+    els.modal.setAttribute("aria-hidden", "false");
+    clearMsg();
+    els.nameInput.value = "";
+    refreshList();
+    setTimeout(() => els.nameInput.focus(), 80);
+  }
+  function close() {
+    els.modal.hidden = true;
+    els.modal.setAttribute("aria-hidden", "true");
+  }
+
+  async function refreshList() {
+    const c = cwd();
+    if (!c) { els.list.innerHTML = `<p class="billing-note">Open a session or VS Code project first.</p>`; return; }
+    els.list.innerHTML = `<p class="billing-note">loading…</p>`;
+    try {
+      const r = await fetch(`/api/git/log?cwd=${encodeURIComponent(c)}`).then((x) => x.json());
+      if (!r.ok) throw new Error(r.error || "load failed");
+      renderRemote(r.remote || {}, r.ghAvailable);
+      if (!r.initialized || r.versions.length === 0) {
+        els.list.innerHTML = `<p class="billing-note">No versions yet. Type a name above and tap Save to create your first one.</p>`;
+        return;
+      }
+      els.list.innerHTML = "";
+      r.versions.forEach((v, idx) => {
+        const row = document.createElement("div");
+        row.className = "version-row" + (idx === 0 ? " current" : "");
+        row.innerHTML = `
+          <div class="version-info">
+            <div class="version-msg">${escapeHtml(v.message)}</div>
+            <div class="version-meta">${escapeHtml(v.shortHash)} · ${fmtAgo(v.ts)}</div>
+          </div>
+          <button class="version-revert" type="button">Revert</button>
+        `;
+        const btn = row.querySelector(".version-revert");
+        btn.addEventListener("click", async () => {
+          const confirmText = `Revert to "${v.message}"?\n\nThis will overwrite your current files with the state from ${v.shortHash}. The current state stays in history, so you can revert again.`;
+          if (!window.confirm(confirmText)) return;
+          btn.disabled = true;
+          btn.textContent = "Reverting…";
+          try {
+            const res = await fetch("/api/git/revert", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ cwd: c, hash: v.hash, name: `Revert to "${v.message}"` }),
+            }).then((x) => x.json());
+            if (!res.ok) throw new Error(res.error || "revert failed");
+            const pushNote =
+              res.push?.pushed ? ` ✓ pushed to ${res.push.branch || "remote"}` :
+              res.push?.message === "no remote configured" ? "" :
+              res.push ? ` (push failed: ${res.push.message})` : "";
+            showMsg(`Reverted to "${v.message}".${pushNote}`, res.push && !res.push.pushed && res.push.message !== "no remote configured" ? "error" : "ok");
+            // Tell the file tree + editor to re-read disk.
+            document.dispatchEvent(new CustomEvent("veronum:session-changed", { detail: { project: state?.project } }));
+            await refreshList();
+            showPushStatus(res.push);
+          } catch (e) {
+            showMsg("Couldn't revert: " + e.message, "error");
+            btn.disabled = false;
+            btn.textContent = "Revert";
+          }
+        });
+        els.list.appendChild(row);
+      });
+    } catch (e) {
+      els.list.innerHTML = `<p class="billing-note">Error: ${escapeHtml(e.message)}</p>`;
+    }
+  }
+
+  // Render the "remote" section. Three states:
+  //   - Has remote → show its URL + a "✓ pushed" / "❌ push failed"
+  //     status under the next save.
+  //   - No remote + gh authed → show a "Create GitHub repo" form
+  //     (name field + Public/Private buttons).
+  //   - No remote + gh not authed → tell the user to run gh auth login.
+  function renderRemote(info, ghAvailable) {
+    if (!els.remote) return;
+    if (info.hasRemote && info.remoteUrl) {
+      els.remote.hidden = false;
+      const niceUrl = info.remoteUrl.replace(/\.git$/, "").replace(/^git@github\.com:/, "https://github.com/");
+      els.remote.innerHTML = `
+        <span style="color:#86efac">●</span>
+        <span class="version-remote-url" title="${escapeHtml(info.remoteUrl)}">${escapeHtml(niceUrl)}</span>
+        <span class="version-remote-status" id="version-remote-status"></span>
+      `;
+      return;
+    }
+    els.remote.hidden = false;
+    if (ghAvailable) {
+      const def = ((cwd() || "").split("/").pop() || "my-project").replace(/[^A-Za-z0-9_-]/g, "-");
+      els.remote.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:8px;width:100%">
+          <div class="dim" style="font-size:12px">No GitHub remote yet. Create one in one tap:</div>
+          <div class="version-create-row">
+            <input id="version-create-name" type="text" placeholder="repo name" value="${escapeHtml(def)}" />
+            <button class="version-create-btn" id="version-create-private">Private</button>
+            <button class="version-create-btn" id="version-create-public" style="background:rgba(255,255,255,.06);color:var(--text,#f4f1ea)">Public</button>
+          </div>
+        </div>
+      `;
+      els.remote.querySelector("#version-create-private").addEventListener("click", () => createRepo("private"));
+      els.remote.querySelector("#version-create-public").addEventListener("click", () => createRepo("public"));
+    } else {
+      els.remote.innerHTML = `
+        <div class="dim" style="font-size:12px">
+          No GitHub remote. To enable auto-push, either add one manually
+          (<code>git remote add origin …</code>) or install + auth the
+          <code>gh</code> CLI (<code>brew install gh && gh auth login</code>)
+          and reopen this modal.
+        </div>
+      `;
+    }
+  }
+
+  async function createRepo(visibility) {
+    const c = cwd();
+    if (!c) return;
+    const nameEl = els.remote.querySelector("#version-create-name");
+    const name = (nameEl?.value || "").trim();
+    if (!name) { showMsg("Pick a repo name first.", "error"); return; }
+    const btns = els.remote.querySelectorAll("button");
+    btns.forEach((b) => { b.disabled = true; });
+    showMsg(`Creating ${visibility} repo "${name}" + pushing…`, "ok");
+    try {
+      const r = await fetch("/api/git/create-github-repo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: c, name, visibility }),
+      }).then((x) => x.json());
+      if (!r.ok) throw new Error(r.error || "create failed");
+      showMsg(`✓ Created + pushed to ${r.remoteUrl}`, "ok");
+      refreshList();
+    } catch (e) {
+      showMsg("Couldn't create repo: " + e.message, "error");
+      btns.forEach((b) => { b.disabled = false; });
+    }
+  }
+
+  // Show the push result after a save/revert in the remote status pill.
+  function showPushStatus(push) {
+    const el = document.getElementById("version-remote-status");
+    if (!el) return;
+    if (!push) { el.textContent = ""; el.dataset.state = ""; return; }
+    if (push.pushed) {
+      el.textContent = "✓ pushed";
+      el.dataset.state = "ok";
+    } else if (push.message === "no changes") {
+      el.textContent = "";
+      el.dataset.state = "";
+    } else if (push.message === "no remote configured") {
+      el.textContent = "";
+      el.dataset.state = "";
+    } else {
+      el.textContent = "❌ push failed";
+      el.dataset.state = "err";
+      el.title = push.message || "";
+    }
+  }
+
+  async function save() {
+    const c = cwd();
+    if (!c) { showMsg("Open a session or VS Code project first.", "error"); return; }
+    const name = els.nameInput.value.trim();
+    if (!name) { showMsg("Give this version a name first.", "error"); return; }
+    els.saveBtn.disabled = true;
+    els.saveBtn.textContent = "Saving…";
+    clearMsg();
+    try {
+      const r = await fetch("/api/git/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: c, message: name }),
+      }).then((x) => x.json());
+      if (!r.ok) throw new Error(r.error || "save failed");
+      if (r.noChanges) {
+        showMsg("Nothing to save — the current files match the last version.", "ok");
+      } else {
+        const pushNote =
+          r.push?.pushed ? ` ✓ pushed to ${r.push.branch || "remote"}` :
+          r.push?.message === "no remote configured" ? "" :
+          r.push ? ` (push failed: ${r.push.message})` : "";
+        showMsg(`Saved as "${name}" (${(r.hash || "").slice(0, 7)}).${pushNote}`, r.push && !r.push.pushed && r.push.message !== "no remote configured" ? "error" : "ok");
+        els.nameInput.value = "";
+      }
+      await refreshList();
+      showPushStatus(r.push);
+    } catch (e) {
+      showMsg("Couldn't save: " + e.message, "error");
+    } finally {
+      els.saveBtn.disabled = false;
+      els.saveBtn.textContent = "Save";
+    }
+  }
+
+  els.btn.addEventListener("click", open);
+  els.closeBtns.forEach((b) => b.addEventListener("click", close));
+  els.saveBtn.addEventListener("click", save);
+  els.nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !els.modal.hidden) close();
+  });
+})();
+
+// ─── Activity tab — recent edits feed ─────────────────────────────
+// Pulls AI Edit/Write/MultiEdit calls from the current session's JSONL
+// plus the in-app editor's saves, renders each as an expandable
+// red/green diff, and lets the user name each change (persisted to
+// .veronum/edits.json per project).
+(() => {
+  const els = {
+    tabBtn: document.querySelector('.preview-tab[data-tab="activity"]'),
+    body: document.querySelector('.preview-body[data-tab="activity"]'),
+    list: document.getElementById("activity-list"),
+    summary: document.getElementById("activity-summary"),
+    refresh: document.getElementById("activity-refresh"),
+    undoBtn: document.getElementById("activity-undo"),
+    redoBtn: document.getElementById("activity-redo"),
+  };
+  if (!els.tabBtn || !els.body) return;
+
+  let lastLoadKey = null;
+  let undoState = { nextUndo: null, nextRedo: null };
+
+  function fmtAgo(ts) {
+    if (!ts) return "";
+    const s = Math.max(0, (Date.now() - ts) / 1000);
+    if (s < 60) return Math.floor(s) + "s ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  }
+
+  // Simple LCS-based line diff. Returns an array of {type: 'add'|'del'|'ctx', text}.
+  // Inputs capped at 2000 lines each to keep the DP table cheap.
+  function lineDiff(before, after) {
+    const a = String(before || "").split("\n").slice(0, 2000);
+    const b = String(after || "").split("\n").slice(0, 2000);
+    const m = a.length, n = b.length;
+    const dp = Array.from({ length: m + 1 }, () => new Uint32Array(n + 1));
+    for (let i = m - 1; i >= 0; i--) {
+      for (let j = n - 1; j >= 0; j--) {
+        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    const out = [];
+    let i = 0, j = 0;
+    while (i < m && j < n) {
+      if (a[i] === b[j]) { out.push({ type: "ctx", text: a[i] }); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: "del", text: a[i] }); i++; }
+      else { out.push({ type: "add", text: b[j] }); j++; }
+    }
+    while (i < m) { out.push({ type: "del", text: a[i++] }); }
+    while (j < n) { out.push({ type: "add", text: b[j++] }); }
+    return out;
+  }
+
+  function renderDiff(before, after) {
+    if (before == null) {
+      // Write tool — no "before" available. Just show the new file
+      // contents with all lines as additions.
+      const lines = String(after || "").split("\n").slice(0, 500);
+      return lines.map((l) => `<div class="diff-line add">${escapeHtml(l)}</div>`).join("");
+    }
+    const lines = lineDiff(before, after);
+    // Collapse long runs of unchanged context to ±3 lines around each
+    // change so the diff stays scannable for large blocks.
+    const collapsed = [];
+    const CONTEXT = 3;
+    let runStart = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].type === "ctx") {
+        if (runStart === -1) runStart = i;
+      } else if (runStart !== -1) {
+        // Trim trailing context of the previous run, leading context of this one.
+        const runLen = i - runStart;
+        if (runLen > CONTEXT * 2 + 1) {
+          collapsed.push(...lines.slice(runStart, runStart + CONTEXT).map((l) => l));
+          collapsed.push({ type: "ctx", text: `… ${runLen - CONTEXT * 2} unchanged lines …` });
+          collapsed.push(...lines.slice(i - CONTEXT, i).map((l) => l));
+        } else {
+          collapsed.push(...lines.slice(runStart, i));
+        }
+        runStart = -1;
+        collapsed.push(lines[i]);
+      } else {
+        collapsed.push(lines[i]);
+      }
+    }
+    if (runStart !== -1) {
+      // Trailing context.
+      const runLen = lines.length - runStart;
+      if (runLen > CONTEXT) {
+        collapsed.push(...lines.slice(runStart, runStart + CONTEXT));
+        if (runLen > CONTEXT) collapsed.push({ type: "ctx", text: `… ${runLen - CONTEXT} unchanged lines …` });
+      } else {
+        collapsed.push(...lines.slice(runStart));
+      }
+    }
+    return collapsed.map((l) => `<div class="diff-line ${l.type}">${escapeHtml(l.text)}</div>`).join("");
+  }
+
+  function renderEntry(e) {
+    const div = document.createElement("div");
+    div.className = "activity-entry";
+    div.dataset.id = e.id;
+    const defaultName = e.relPath + (e.isWrite ? " (wrote)" : "");
+    const displayName = e.name || defaultName;
+    div.innerHTML = `
+      <div class="activity-entry-head">
+        <span class="activity-source" data-source="${escapeHtml(e.source)}">${escapeHtml(e.source)}</span>
+        <span class="activity-counts">
+          <span class="activity-added">+${e.added}</span><span class="activity-removed">-${e.removed}</span>
+        </span>
+        <span class="activity-path">${escapeHtml(displayName)}</span>
+        <span class="activity-time">${fmtAgo(e.ts)}</span>
+      </div>
+      <div class="activity-entry-body">
+        <div class="activity-name-row">
+          <input type="text" placeholder="Name this change…" value="${escapeHtml(e.name || "")}" />
+          <button class="activity-name-save" type="button">Save name</button>
+        </div>
+        <div class="activity-diff">${renderDiff(e.before, e.after)}</div>
+      </div>
+    `;
+    const head = div.querySelector(".activity-entry-head");
+    head.addEventListener("click", () => div.classList.toggle("open"));
+    const input = div.querySelector("input");
+    const saveBtn = div.querySelector(".activity-name-save");
+    const persist = async () => {
+      const cwd = (typeof state !== "undefined" && state?.project?.cwd) || null;
+      if (!cwd) return;
+      try {
+        await fetch("/api/activity/name", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cwd, id: e.id, name: input.value }),
+        });
+        e.name = input.value;
+        const pathSpan = div.querySelector(".activity-path");
+        if (pathSpan) pathSpan.textContent = e.name || defaultName;
+        saveBtn.textContent = "✓ saved";
+        setTimeout(() => { saveBtn.textContent = "Save name"; }, 1500);
+      } catch (err) {
+        saveBtn.textContent = "Error";
+      }
+    };
+    saveBtn.addEventListener("click", persist);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") persist(); });
+    return div;
+  }
+
+  async function load() {
+    const cwd = (typeof state !== "undefined" && state?.project?.cwd) || null;
+    if (!cwd) {
+      els.list.innerHTML = `<div class="activity-empty">Open a session or VS Code project first.</div>`;
+      els.summary.textContent = "";
+      return;
+    }
+    const source = (typeof state !== "undefined" && state?.editor) || "";
+    const sid = (typeof state !== "undefined" && state?.sessionId) || "";
+    const key = `${source}|${cwd}|${sid}`;
+    lastLoadKey = key;
+    els.summary.textContent = "loading…";
+    try {
+      const params = new URLSearchParams({ cwd });
+      if (source && source !== "vscode") params.set("source", source);
+      if (sid && !String(sid).startsWith("vscode:")) params.set("id", sid);
+      const r = await fetch("/api/activity?" + params.toString()).then((x) => x.json());
+      if (key !== lastLoadKey) return; // user navigated away while we loaded
+      if (!r.ok) throw new Error(r.error || "load failed");
+      els.list.innerHTML = "";
+      if (!r.edits || r.edits.length === 0) {
+        els.list.innerHTML = `<div class="activity-empty">No edits yet. AI edits + your saves will appear here.</div>`;
+        els.summary.textContent = "0 edits";
+        updateUndoButtons(null, null);
+        return;
+      }
+      for (const e of r.edits) els.list.appendChild(renderEntry(e));
+      els.summary.textContent = `${r.edits.length} edit${r.edits.length === 1 ? "" : "s"}`;
+      // Compute undo/redo state from the same edits we just rendered.
+      updateUndoButtons(...computeUndoState(r.edits));
+    } catch (e) {
+      els.list.innerHTML = `<div class="activity-empty">Error: ${escapeHtml(e.message)}</div>`;
+      els.summary.textContent = "error";
+    }
+  }
+
+  // Mirror of the server-side computeUndoState (lib/activity.js).
+  // Returns [nextUndo, nextRedo] so the buttons can enable/disable
+  // and show what they're about to undo.
+  function computeUndoState(edits) {
+    const undone = new Set();
+    const redone = new Set();
+    let nextUndo = null, nextRedo = null;
+    for (const e of edits) {
+      if (e.source === "redo" && e.undoneId) {
+        redone.add(e.undoneId);
+        undone.delete(e.undoneId);
+      } else if (e.source === "undo" && e.undoneId) {
+        if (!redone.has(e.undoneId)) {
+          undone.add(e.undoneId);
+          if (!nextRedo) nextRedo = e;
+        } else {
+          redone.delete(e.undoneId);
+        }
+      } else if (e.source === "claude" || e.source === "cursor" || e.source === "user") {
+        if (!nextUndo && !undone.has(e.id)) nextUndo = e;
+      }
+    }
+    return [nextUndo, nextRedo];
+  }
+
+  function updateUndoButtons(nextUndo, nextRedo) {
+    undoState = { nextUndo, nextRedo };
+    if (els.undoBtn) {
+      els.undoBtn.disabled = !nextUndo;
+      els.undoBtn.title = nextUndo
+        ? `Undo: ${nextUndo.name || nextUndo.relPath} (${nextUndo.source})`
+        : "Nothing to undo";
+    }
+    if (els.redoBtn) {
+      els.redoBtn.disabled = !nextRedo;
+      els.redoBtn.title = nextRedo ? `Redo last undo` : "Nothing to redo";
+    }
+  }
+
+  async function doUndo() {
+    const cwd = (typeof state !== "undefined" && state?.project?.cwd) || null;
+    if (!cwd || !undoState.nextUndo) return;
+    els.undoBtn.disabled = true;
+    try {
+      const source = (state?.editor && state.editor !== "vscode") ? state.editor : "";
+      const sid = (state?.sessionId && !String(state.sessionId).startsWith("vscode:")) ? state.sessionId : "";
+      const r = await fetch("/api/activity/undo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, source, id: sid }),
+      }).then((x) => x.json());
+      if (!r.ok) throw new Error(r.error || "undo failed");
+      // Reload activity + tell the file tree/editor to re-read disk.
+      document.dispatchEvent(new CustomEvent("veronum:session-changed", { detail: { project: state?.project } }));
+      await load();
+    } catch (e) {
+      alert("Couldn't undo: " + e.message);
+      els.undoBtn.disabled = false;
+    }
+  }
+
+  async function doRedo() {
+    const cwd = (typeof state !== "undefined" && state?.project?.cwd) || null;
+    if (!cwd || !undoState.nextRedo) return;
+    els.redoBtn.disabled = true;
+    try {
+      const source = (state?.editor && state.editor !== "vscode") ? state.editor : "";
+      const sid = (state?.sessionId && !String(state.sessionId).startsWith("vscode:")) ? state.sessionId : "";
+      const r = await fetch("/api/activity/redo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, source, id: sid }),
+      }).then((x) => x.json());
+      if (!r.ok) throw new Error(r.error || "redo failed");
+      document.dispatchEvent(new CustomEvent("veronum:session-changed", { detail: { project: state?.project } }));
+      await load();
+    } catch (e) {
+      alert("Couldn't redo: " + e.message);
+      els.redoBtn.disabled = false;
+    }
+  }
+
+  els.tabBtn.addEventListener("click", () => setTimeout(load, 50));
+  els.refresh.addEventListener("click", load);
+  els.undoBtn?.addEventListener("click", doUndo);
+  els.redoBtn?.addEventListener("click", doRedo);
+  document.addEventListener("veronum:session-changed", () => {
+    if (els.body && !els.body.hidden) load();
+  });
+
+  // Global cmd+Z / cmd+shift+Z. Only fires when no text input is
+  // focused (so typing in the editor / chat doesn't trigger global
+  // undo). The active tab must be Activity OR the file editor for
+  // the shortcut to make sense — but for now we let it fire from
+  // anywhere in the workspace panel since that's where users live.
+  document.addEventListener("keydown", (e) => {
+    const meta = e.metaKey || e.ctrlKey;
+    if (!meta) return;
+    const tag = (document.activeElement?.tagName || "").toLowerCase();
+    // Don't hijack cmd+Z while inside an input/textarea — native
+    // editor undo takes priority for that field.
+    if (tag === "textarea" || tag === "input") return;
+    const key = e.key.toLowerCase();
+    if (key === "z" && !e.shiftKey) { e.preventDefault(); doUndo(); }
+    else if ((key === "z" && e.shiftKey) || key === "y") { e.preventDefault(); doRedo(); }
+  });
+})();
+
+// ─── In-browser terminal ────────────────────────────────────────────
+// Real zsh via node-pty on the server, xterm.js on the client. Each
+// "+" click spawns a fresh shell rooted at the current session's cwd.
+// Tabs in the strip switch between live terminals; "×" closes one.
+// xterm.js + fit addon are loaded lazily from CDN the first time the
+// Terminal tab is opened, so the bundle stays small for users who
+// only use Files / Preview.
+(() => {
+  const els = {
+    tabBtn: document.querySelector('.preview-tab[data-tab="terminal"]'),
+    stage: document.getElementById("term-stage"),
+    strip: document.getElementById("term-tab-strip"),
+    addBtn: document.getElementById("term-add-btn"),
+    empty: document.getElementById("term-empty"),
+    panel: document.getElementById("preview-panel"),
+  };
+  if (!els.tabBtn || !els.stage) return;
+
+  // xterm + addon-fit are served locally from /vendor/xterm/* — see
+  // server.js (no CDN dependency, avoids load failures on networks
+  // that block jsdelivr / unpkg).
+  let loadingXterm = null;
+  function ensureXterm() {
+    if (window.Terminal && (window.FitAddon?.FitAddon || window.FitAddon)) return Promise.resolve();
+    if (loadingXterm) return loadingXterm;
+    loadingXterm = new Promise((resolve, reject) => {
+      const css = document.createElement("link");
+      css.rel = "stylesheet";
+      css.href = "/vendor/xterm/css/xterm.css";
+      document.head.appendChild(css);
+
+      const s1 = document.createElement("script");
+      s1.src = "/vendor/xterm/lib/xterm.js";
+      s1.onload = () => {
+        const s2 = document.createElement("script");
+        s2.src = "/vendor/xterm-fit/lib/addon-fit.js";
+        s2.onload = () => resolve();
+        s2.onerror = () => reject(new Error("addon-fit failed to load"));
+        document.body.appendChild(s2);
+      };
+      s1.onerror = () => reject(new Error("xterm.js failed to load"));
+      document.body.appendChild(s1);
+    });
+    return loadingXterm;
+  }
+
+  function currentCwd() {
+    return (typeof state !== "undefined" && state?.project?.cwd) || null;
+  }
+  function projectLabel(cwd) {
+    const parts = String(cwd).split("/").filter(Boolean);
+    return parts[parts.length - 1] || cwd;
+  }
+
+  const terms = new Map(); // id → { container, xterm, fit, ws, tabEl, cwd }
+  let activeTermId = null;
+  let _nextId = 1;
+
+  async function spawnTerm() {
+    try { await ensureXterm(); }
+    catch (e) {
+      els.empty.hidden = false;
+      els.empty.textContent = "Couldn't load xterm.js: " + e.message;
+      return;
+    }
+    const cwd = currentCwd();
+    if (!cwd) {
+      els.empty.hidden = false;
+      els.empty.textContent = "Open a session first — terminals are rooted at the session's project folder.";
+      return;
+    }
+
+    const id = _nextId++;
+    const container = document.createElement("div");
+    container.className = "term-instance";
+    els.stage.appendChild(container);
+    els.empty.hidden = true;
+
+    // Tab pill in the strip.
+    const tabEl = document.createElement("div");
+    tabEl.className = "term-tab";
+    const label = document.createElement("span");
+    label.textContent = `${projectLabel(cwd)} · #${id}`;
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "term-tab-close";
+    closeBtn.type = "button";
+    closeBtn.textContent = "×";
+    closeBtn.setAttribute("aria-label", "Close terminal");
+    tabEl.appendChild(label);
+    tabEl.appendChild(closeBtn);
+    els.strip.appendChild(tabEl);
+
+    // xterm instance.
+    const FitAddonCtor = window.FitAddon?.FitAddon || window.FitAddon;
+    const term = new window.Terminal({
+      fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+      fontSize: 13,
+      cursorBlink: true,
+      convertEol: false,
+      scrollback: 5000,
+      theme: {
+        background: "#141414",
+        foreground: "#f4f1ea",
+        cursor: "#a78bfa",
+        selectionBackground: "rgba(167,139,250,0.30)",
+      },
+    });
+    const fit = new FitAddonCtor();
+    term.loadAddon(fit);
+    term.open(container);
+    try { fit.fit(); } catch {}
+
+    // WebSocket to the daemon's terminal mount.
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/api/terminal/stream` +
+      `?cwd=${encodeURIComponent(cwd)}&cols=${term.cols}&rows=${term.rows}`;
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      term.write(`\x1b[2;37m✦ zsh @ ${cwd}\x1b[0m\r\n`);
+    };
+    ws.onmessage = (e) => {
+      let msg; try { msg = JSON.parse(e.data); } catch { return; }
+      if (msg.type === "data") term.write(msg.data);
+      else if (msg.type === "exit") term.write(`\r\n\x1b[31m[shell exited]\x1b[0m\r\n`);
+      else if (msg.type === "error") term.write(`\r\n\x1b[31merror: ${msg.message}\x1b[0m\r\n`);
+    };
+    ws.onerror = () => term.write(`\r\n\x1b[31m[ws error]\x1b[0m\r\n`);
+
+    term.onData((data) => {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({ type: "input", data }));
+      }
+    });
+    term.onResize(({ cols, rows }) => {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      }
+    });
+
+    terms.set(id, { id, container, xterm: term, fit, ws, tabEl, cwd });
+
+    tabEl.addEventListener("click", (e) => {
+      if (e.target === closeBtn) return;
+      activate(id);
+    });
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      destroy(id);
+    });
+
+    activate(id);
+  }
+
+  function activate(id) {
+    activeTermId = id;
+    for (const [tid, t] of terms) {
+      t.container.hidden = tid !== id;
+      t.tabEl.classList.toggle("active", tid === id);
+      if (tid === id) {
+        try { t.fit.fit(); } catch {}
+        try { t.xterm.focus(); } catch {}
+      }
+    }
+  }
+
+  function destroy(id) {
+    const t = terms.get(id);
+    if (!t) return;
+    try { t.ws.close(); } catch {}
+    try { t.xterm.dispose(); } catch {}
+    t.container.remove();
+    t.tabEl.remove();
+    terms.delete(id);
+    if (activeTermId === id) {
+      activeTermId = null;
+      const next = terms.keys().next().value;
+      if (next != null) activate(next);
+      else { els.empty.hidden = false; els.empty.textContent = "Tap + above to start a new terminal."; }
+    }
+  }
+
+  els.addBtn.addEventListener("click", spawnTerm);
+
+  // Auto-spawn the first terminal the moment the user opens the tab —
+  // skips an extra click for the most common case (1 terminal).
+  els.tabBtn.addEventListener("click", () => {
+    setTimeout(() => {
+      if (terms.size === 0 && currentCwd()) spawnTerm();
+      else {
+        for (const t of terms.values()) {
+          try { t.fit.fit(); } catch {}
+        }
+      }
+    }, 60);
+  });
+
+  // Refit the active terminal on window resize or panel resize.
+  window.addEventListener("resize", () => {
+    if (activeTermId == null) return;
+    const t = terms.get(activeTermId);
+    if (t) try { t.fit.fit(); } catch {}
+  });
 })();

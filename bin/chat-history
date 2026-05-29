@@ -95,6 +95,27 @@ def cmd_count(path: str) -> int:
     return 0
 
 
+def cmd_last(path: str) -> int:
+    last_text = None
+    for _n, _ts, text in iter_user_text_messages(path):
+        last_text = text
+    if last_text is None:
+        print("(no user text messages found)", file=sys.stderr)
+        return 1
+    print(last_text)
+    return 0
+
+
+def cmd_last_ts(path: str) -> int:
+    last_ts = None
+    for _n, ts, _t in iter_user_text_messages(path):
+        last_ts = ts
+    if last_ts is None:
+        return 1
+    print(last_ts)
+    return 0
+
+
 def cmd_first_ts(path: str) -> int:
     for _n, ts, _t in iter_user_text_messages(path):
         print(ts)
@@ -156,12 +177,16 @@ def main(argv: list[str]) -> int:
     try:
         if cmd == "first" and len(rest) == 1:
             return cmd_first(rest[0])
+        if cmd == "last" and len(rest) == 1:
+            return cmd_last(rest[0])
         if cmd == "nth" and len(rest) == 2:
             return cmd_nth(rest[0], rest[1])
         if cmd == "count" and len(rest) == 1:
             return cmd_count(rest[0])
         if cmd == "first-ts" and len(rest) == 1:
             return cmd_first_ts(rest[0])
+        if cmd == "last-ts" and len(rest) == 1:
+            return cmd_last_ts(rest[0])
         if cmd == "nth-ts" and len(rest) == 2:
             return cmd_nth_ts(rest[0], rest[1])
         if cmd == "list" and 1 <= len(rest) <= 2:
