@@ -24,6 +24,7 @@ const jsonlCache = require("./lib/jsonlCache");
 const claudeReader = require("./lib/claudeReader");
 const cursorReader = require("./lib/cursor");
 const vscodeReader = require("./lib/vscode");
+const analytics = require("./lib/analytics");
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
@@ -421,6 +422,15 @@ app.post("/api/claude/send", async (req, res) => {
   const useEffort = CLAUDE_EFFORT_OPTIONS.has(effort) ? effort : "max";
 
   const { sendEvent, close } = openSseStream(res);
+  // Analytics: count this as a chat-mode dispatch into Claude. Voice
+  // turns also funnel through this endpoint via submit_to_claude, but
+  // we capture voice separately via voice_started + the body.via field
+  // when present.
+  analytics.emit("dispatch_sent", {
+    editor: "claude",
+    mode: req.body?.via === "voice" ? "voice" : "chat",
+    metadata: { model: useModelShort, effort: useEffort },
+  });
   sendEvent("status", {
     phase: "spawning",
     detail: `spawning claude (${useModelShort}, ${useEffort}) --resume ${sessionId.slice(0,8)}…`,
@@ -590,6 +600,11 @@ app.post("/api/cursor/send", async (req, res) => {
     }
   }
   const { sendEvent, close } = openSseStream(res);
+  analytics.emit("dispatch_sent", {
+    editor: "cursor",
+    mode: req.body?.via === "voice" ? "voice" : "chat",
+    metadata: { model },
+  });
   sendEvent("status", { phase: "spawning" });
 
   const cursorBin = whichCursorAgentBin();
@@ -878,6 +893,7 @@ app.get("/api/voice/realtime-token", async (_req, res) => {
       });
     }
     const data = await r.json();
+    analytics.emit("voice_started", { metadata: { model: REALTIME_MODEL } });
     // GA shape: { value, expires_at } at top level.
     res.json({
       ok: true,

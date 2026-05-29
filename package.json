@@ -2,7 +2,7 @@
   "name": "veronum-bridge",
   "productName": "Veronum Bridge",
   "version": "0.3.6",
-  "description": "Mac bridge daemon — runs claude/cursor session relay locally so the user's chat UI on any device can reach their machine.",
+  "description": "Mac bridge daemon \u2014 runs claude/cursor session relay locally so the user's chat UI on any device can reach their machine.",
   "private": true,
   "type": "commonjs",
   "main": "electron/main.js",
